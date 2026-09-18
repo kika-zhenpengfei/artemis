@@ -25,11 +25,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import mcp_server.tools.device_execution as device_execution_tools
 from mcp_server.tools import (
+    mobile_act,
     mobile_get_device_state,
     mobile_inspect_trace,
     mobile_manage_task,
+    mobile_observe,
     mobile_run_task,
+    mobile_session,
+    mobile_verify,
 )
 from artemis.runtime import trace_store
 
@@ -44,6 +49,24 @@ def temp_trace_env(monkeypatch):
 
 
 def test_tool_signatures():
+    sig_session = inspect.signature(mobile_session)
+    assert "operation" in sig_session.parameters
+    assert "device_serial" in sig_session.parameters
+    assert "idle_timeout_seconds" in sig_session.parameters
+
+    sig_observe = inspect.signature(mobile_observe)
+    assert "session_id" in sig_observe.parameters
+    assert "settle_ms" in sig_observe.parameters
+
+    sig_act = inspect.signature(mobile_act)
+    assert "action" in sig_act.parameters
+    assert "arguments" in sig_act.parameters
+    assert "observation_id" in sig_act.parameters
+
+    sig_verify = inspect.signature(mobile_verify)
+    assert "assertion" in sig_verify.parameters
+    assert "evidence" in sig_verify.parameters
+
     # mobile_run_task signature check
     sig_run = inspect.signature(mobile_run_task)
     assert "task_desc" in sig_run.parameters
@@ -81,6 +104,85 @@ def test_tool_signatures():
     assert "step_range" in sig_inspect.parameters
     assert sig_inspect.parameters["max_results"].default == 5
     assert "'search'" in (mobile_inspect_trace.__doc__ or "")
+
+
+@pytest.mark.asyncio
+async def test_web_ui_auto_start_is_disabled_outside_executor_mode(monkeypatch):
+    monkeypatch.delenv("ARTEMIS_AUTO_START_UI", raising=False)
+    monkeypatch.delenv("ARTEMIS_EXECUTOR_ONLY", raising=False)
+
+    with patch.object(device_execution_tools, "is_artemis_daemon") as is_daemon:
+        result = await device_execution_tools._ensure_web_ui_started()
+
+    is_daemon.assert_not_called()
+    assert result["status"] == "disabled"
+
+
+@pytest.mark.asyncio
+async def test_web_ui_auto_start_reuses_running_server(monkeypatch):
+    monkeypatch.setenv("ARTEMIS_EXECUTOR_ONLY", "1")
+    monkeypatch.setenv("ARTEMIS_UI_PORT", "8123")
+
+    with (
+        patch.object(device_execution_tools, "is_artemis_daemon", return_value=True),
+        patch.object(device_execution_tools, "spawn_daemon") as spawn,
+    ):
+        result = await device_execution_tools._ensure_web_ui_started()
+
+    spawn.assert_not_called()
+    assert result["status"] == "running"
+    assert result["url"] == "http://localhost:8123"
+
+
+@pytest.mark.asyncio
+async def test_web_ui_auto_start_does_not_take_over_occupied_port(monkeypatch):
+    monkeypatch.setenv("ARTEMIS_AUTO_START_UI", "true")
+
+    with (
+        patch.object(device_execution_tools, "is_artemis_daemon", return_value=False),
+        patch.object(device_execution_tools, "is_port_in_use", return_value=True),
+        patch.object(device_execution_tools, "spawn_daemon") as spawn,
+    ):
+        result = await device_execution_tools._ensure_web_ui_started()
+
+    spawn.assert_not_called()
+    assert result["status"] == "port_conflict"
+
+
+@pytest.mark.asyncio
+async def test_web_ui_auto_start_spawns_daemon(monkeypatch):
+    monkeypatch.setenv("ARTEMIS_AUTO_START_UI", "true")
+    process = MagicMock(pid=43210)
+    process.poll.return_value = None
+
+    with (
+        patch.object(device_execution_tools, "is_artemis_daemon", side_effect=[False, True]),
+        patch.object(device_execution_tools, "is_port_in_use", return_value=False),
+        patch.object(device_execution_tools, "spawn_daemon", return_value=process) as spawn,
+    ):
+        result = await device_execution_tools._ensure_web_ui_started(timeout_seconds=1.0)
+
+    spawn.assert_called_once_with("127.0.0.1", 8000)
+    assert result["status"] == "started"
+    assert result["pid"] == 43210
+
+
+@pytest.mark.asyncio
+async def test_mobile_session_open_includes_web_ui_status(monkeypatch):
+    manager = MagicMock()
+    manager.open = AsyncMock(return_value={"session_id": "session-1", "status": "open"})
+    monkeypatch.setattr(device_execution_tools, "_manager", manager)
+    web_ui = {"enabled": True, "status": "started", "url": "http://localhost:8000"}
+
+    with patch.object(
+        device_execution_tools,
+        "_ensure_web_ui_started",
+        AsyncMock(return_value=web_ui),
+    ):
+        result = await mobile_session(operation="open", goal="Open app")
+
+    manager.open.assert_awaited_once()
+    assert result["web_ui"] == web_ui
 
 
 def test_mobile_run_task_invalid_model():
@@ -431,6 +533,42 @@ async def test_mobile_inspect_trace_includes_device_serial(temp_trace_env):
     assert "**Device Serial:** `pixel-target-999`" in res_summary
 
 
+@pytest.mark.asyncio
+async def test_mobile_inspect_trace_renders_codex_as_linear_execution(temp_trace_env):
+    trace_id = str(uuid.uuid4())
+    trace_store.init_trace(
+        trace_id,
+        "Codex executor test",
+        "Codex",
+        device_serial="pixel-codex",
+    )
+    _seed_trace(temp_trace_env, trace_id)
+
+    summary = await mobile_inspect_trace(action="view_summary", trace_id=trace_id)
+
+    assert "# ARTEMIS Codex Execution Summary" in summary
+    assert "**Model:** Codex" in summary
+    assert "No task plan created yet" not in summary
+
+
+@pytest.mark.asyncio
+async def test_mobile_inspect_trace_renders_zcode_as_linear_execution(temp_trace_env):
+    trace_id = str(uuid.uuid4())
+    trace_store.init_trace(
+        trace_id,
+        "ZCode executor test",
+        "ZCode",
+        device_serial="pixel-zcode",
+    )
+    _seed_trace(temp_trace_env, trace_id)
+
+    summary = await mobile_inspect_trace(action="view_summary", trace_id=trace_id)
+
+    assert "# ARTEMIS ZCode Execution Summary" in summary
+    assert "**Model:** ZCode" in summary
+    assert "No task plan created yet" not in summary
+
+
 def test_trace_store_device_serial(temp_trace_env):
     trace_id = "test-store-serial"
     data = trace_store.init_trace(trace_id, "desc", "Flash", "conv", device_serial="init-serial")
@@ -505,6 +643,25 @@ def test_mobile_manage_task_stop_via_daemon(temp_trace_env, monkeypatch):
         mock_stop.assert_called_once_with(trace_id)
         assert res["status"] == "cancelled"
         assert trace_store.read_status(trace_id)["status"] == "cancelled"
+
+
+@pytest.mark.parametrize("agent_name", ["Codex", "ZCode"])
+def test_mobile_manage_task_does_not_kill_external_agent_mcp_process(temp_trace_env, agent_name):
+    trace_id = str(uuid.uuid4())
+    trace_store.init_trace(
+        trace_id,
+        f"{agent_name} device lease",
+        agent_name,
+        device_serial="pixel-1",
+    )
+    trace_store.update_trace_pid(trace_id, os.getpid())
+
+    with patch("mcp_server.tools.task_manager.os.kill") as kill:
+        result = mobile_manage_task(action="stop", trace_id=trace_id)
+
+    kill.assert_not_called()
+    assert result["status"] == "running"
+    assert "mobile_session(operation='close'" in result["message"]
 
 
 def _seed_trace(temp_dir: str, trace_id: str, *, with_image: bool = True) -> str:

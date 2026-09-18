@@ -144,14 +144,15 @@ def init_command() -> None:
     console.print("  [4] Windsurf")
     console.print("  [5] VS Code / Cline / Roo Code")
     console.print("  [6] Codex")
-    console.print("  [7] All supported IDEs")
-    console.print("  [8] Skip for now")
+    console.print("  [7] ZCode")
+    console.print("  [8] All supported IDEs")
+    console.print("  [9] Skip for now")
     mcp_choice = Prompt.ask(
         "Select IDE for MCP auto-install",
-        choices=["1", "2", "3", "4", "5", "6", "7", "8"],
+        choices=["1", "2", "3", "4", "5", "6", "7", "8", "9"],
         default="1",
     )
-    if mcp_choice != "8":
+    if mcp_choice != "9":
         target_map = {
             "1": "antigravity",
             "2": "cursor",
@@ -159,7 +160,8 @@ def init_command() -> None:
             "4": "windsurf",
             "5": "vscode",
             "6": "codex",
-            "7": "all",
+            "7": "zcode",
+            "8": "all",
         }
         target = target_map.get(mcp_choice, "antigravity")
         try:

@@ -15,6 +15,12 @@
 """MCP Tools package for ARTEMIS."""
 
 from mcp_server.tools.device_state import mobile_get_device_state
+from mcp_server.tools.device_execution import (
+    mobile_act,
+    mobile_observe,
+    mobile_session,
+    mobile_verify,
+)
 from mcp_server.tools.diagnose import mobile_diagnose
 from mcp_server.tools.inspect_trace import mobile_inspect_trace
 from mcp_server.tools.task_manager import mobile_manage_task
@@ -26,4 +32,8 @@ __all__ = [
     "mobile_get_device_state",
     "mobile_inspect_trace",
     "mobile_diagnose",
+    "mobile_session",
+    "mobile_observe",
+    "mobile_act",
+    "mobile_verify",
 ]

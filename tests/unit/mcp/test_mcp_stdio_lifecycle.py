@@ -142,6 +142,10 @@ def test_mcp_stdio_handshake_immediate_input():
         tools = tools_data.get("result", {}).get("tools", [])
         tool_names = {t["name"] for t in tools}
         assert {
+            "mobile_session",
+            "mobile_observe",
+            "mobile_act",
+            "mobile_verify",
             "mobile_run_task",
             "mobile_manage_task",
             "mobile_get_device_state",

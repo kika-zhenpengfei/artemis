@@ -21,6 +21,7 @@ mcp_server/
 │   ├── file.py           # File audit logger (notifications.jsonl)
 │   └── composite.py      # Multi-channel notification dispatcher
 ├── tools/                # Modular standard MCP tools
+│   ├── device_execution.py # mobile_session / observe / act / verify
 │   ├── task_runner.py    # mobile_run_task
 │   ├── task_manager.py   # mobile_manage_task
 │   ├── device_state.py   # mobile_get_device_state
@@ -68,11 +69,17 @@ When you run `uv run artemis mcp --install all` (or target a specific IDE like `
 * **VS Code**: Automatically installs global rules to `~/.vscode/rules/artemis.md`.
 * **Cline / Roo Code**: Automatically installs global rules to `~/.cline/rules/artemis.md` and `~/.roo/rules/artemis.md`.
 * **OpenClaw**: Automatically installs global rules to `~/.openclaw/rules/artemis.md`.
+* **Codex**: Installs the managed block into `~/.codex/AGENTS.md` (or an active override file).
+* **ZCode**: Installs the managed block into `~/.zcode/AGENTS.md`.
 
 *(Note: If you prefer manual configuration, you can also copy the contents of [`rules.md`](./rules.md) into your IDE's system prompt or global rules settings.)*
 
 ## 🛠️ MCP Tools Overview
 
+* **`mobile_session`**: Opens, inspects, or closes a device lease controlled by the current external Agent session. On the first `open`, executor mode lazily starts the WebUI when `ARTEMIS_AUTO_START_UI=true` (default for generated Codex and ZCode config), reuses an existing ARTEMIS server, and reports port conflicts without blocking device execution. The device lock is held for the session lifetime and the resulting session appears in the WebUI with its originating Agent client.
+* **`mobile_observe`**: Captures the current screenshot and indexed UI elements, returns a fresh `observation_id`, and persists an observation step.
+* **`mobile_act`**: Executes one action through the shared ARTEMIS actuator, then observes and persists the result. Screen actions require the latest `observation_id`; use indexed elements first and normalized coordinates as fallback.
+* **`mobile_verify`**: Records an evidence-backed `passed`, `failed`, or `inconclusive` verification in the same WebUI timeline.
 * **`mobile_run_task`**: Asynchronously launches an autonomous mobile automation task (`Flash` or `Pro` model) with optional `device_serial` targeting. Pro runs can be tuned with `verification_level` (`off` | `final` | `checkpoints` | `strict` — how much the Checker audits) and `explorer_mode` (`flash` | `pro` | `ultra` — the Operator's perception depth).
 * **`mobile_manage_task`**: Manages task lifecycle (`status`, `stop`, `inject_instruction`), returning task state and assigned `device_serial`. Pass `release_loop=True` with `inject_instruction` to gracefully end a `[Loop:continuous]` monitoring task — this explicit signal (not "please stop" wording) is what unlocks the loop milestone's completion.
 * **`mobile_get_device_state`**: Real-time observer (`screenshot` or OCR+XML `hierarchy`) with optional `device_serial`.
@@ -100,12 +107,13 @@ uv run artemis mcp
 ### IDE Configuration
 
 #### One-Click Auto Install (Recommended)
-Run the automated installer to detect and configure your IDE (Antigravity, Cursor, Claude Code/Desktop, OpenClaw):
+Run the automated installer to configure your Agent or IDE:
 ```bash
 uv run artemis mcp --install all
-# Or install specifically for Antigravity:
-uv run artemis mcp --install antigravity
+# Or install the client-driven executor specifically:
+uv run artemis mcp --install codex --mode executor
+uv run artemis mcp --install zcode --mode executor
 ```
 
 #### Manual JSON Config Generation
-Run `uv run artemis mcp --generate-config antigravity` (or `all`) to output ready-to-use configuration JSON with resolved `.venv` Python and project paths.
+Run `uv run artemis mcp --generate-config zcode` (or `all`) to output ready-to-use configuration with resolved `.venv` Python and project paths.

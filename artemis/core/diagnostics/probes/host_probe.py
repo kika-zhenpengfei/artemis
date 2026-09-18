@@ -73,6 +73,7 @@ MCP_CLIENT_NAMES: tuple[str, ...] = (
     "roo",
     "openclaw",
     "codex",
+    "zcode",
 )
 
 
@@ -89,6 +90,9 @@ def detect_mcp_client() -> str | None:
     before the generic VS Code markers because Cursor, Windsurf, Cline and Roo
     are (or run inside) VS Code and inherit ``VSCODE_*`` / ``TERM_PROGRAM``.
     """
+    configured_client = os.environ.get("ARTEMIS_AGENT_CLIENT", "").strip().lower()
+    if configured_client in MCP_CLIENT_NAMES:
+        return configured_client
     # Antigravity injects its language-server endpoint and CSRF token
     # (ANTIGRAVITY_LS_ADDRESS / ANTIGRAVITY_CSRF_TOKEN) so child processes can
     # call `agentapi`; mcp_server/notifiers/agentapi.py relies on the same pair.

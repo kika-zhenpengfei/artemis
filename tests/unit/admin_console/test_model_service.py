@@ -37,6 +37,26 @@ def test_get_active_model_info_flash_architecture():
     assert info["provider"] == "google"
 
 
+def test_get_active_model_info_codex_architecture():
+    info = ModelService.get_active_model_info("codex")
+    assert info == {
+        "name": "Codex",
+        "id": "current-codex-session",
+        "provider": "openai",
+        "architecture": "Codex + ARTEMIS DeviceExecution",
+    }
+
+
+def test_get_active_model_info_zcode_architecture():
+    info = ModelService.get_active_model_info("zcode")
+    assert info == {
+        "name": "ZCode",
+        "id": "current-zcode-session",
+        "provider": "z.ai",
+        "architecture": "ZCode + ARTEMIS DeviceExecution",
+    }
+
+
 def test_resolve_session_profile_from_device_info():
     """Verify profile resolution from device_info JSON."""
     row = {"device_info": json.dumps({"profile": "pro"})}
@@ -44,6 +64,12 @@ def test_resolve_session_profile_from_device_info():
 
     row_flash = {"device_info": json.dumps({"profile": "flash"})}
     assert ModelService.resolve_session_profile(row_flash) == "flash"
+
+    row_codex = {"device_info": json.dumps({"profile": "codex"})}
+    assert ModelService.resolve_session_profile(row_codex) == "codex"
+
+    row_zcode = {"device_info": json.dumps({"profile": "zcode"})}
+    assert ModelService.resolve_session_profile(row_zcode) == "zcode"
 
 
 def test_resolve_session_profile_from_agent_names():

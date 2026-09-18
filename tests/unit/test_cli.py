@@ -167,6 +167,7 @@ def test_cli_mcp_help():
     assert result.exit_code == 0
     assert "--type" in result.output
     assert "--generate-config" in result.output
+    assert "--mode" in result.output
 
 
 def test_cli_mcp_generate_config():
@@ -192,6 +193,10 @@ def test_cli_mcp_generate_config_antigravity():
 
     legacy_config = _get_config_snippet("jetski", "python", "/project")["mcpServers"]["artemis"]
     assert set(legacy_config["tools"]) == {
+        "mobile_session",
+        "mobile_observe",
+        "mobile_act",
+        "mobile_verify",
         "mobile_run_task",
         "mobile_manage_task",
         "mobile_get_device_state",
@@ -213,6 +218,7 @@ def test_cli_mcp_generate_config_all():
     assert "cline" in result.output
     assert "roo" in result.output
     assert "codex" in result.output
+    assert "zcode" in result.output
 
 
 def test_cli_mcp_generate_config_codex():
@@ -231,12 +237,51 @@ def test_cli_mcp_generate_config_codex():
     assert "mobile_manage_task" in result.output
     server_config = _get_config_snippet("codex", "python", "/project")["mcp_servers"]["artemis"]
     assert server_config["enabled_tools"] == [
+        "mobile_session",
+        "mobile_observe",
+        "mobile_act",
+        "mobile_verify",
         "mobile_run_task",
         "mobile_manage_task",
         "mobile_get_device_state",
         "mobile_inspect_trace",
         "mobile_diagnose",
     ]
+    assert server_config["env"]["ARTEMIS_AGENT_CLIENT"] == "codex"
+    assert server_config["env"]["ARTEMIS_EXECUTION_MODE"] == "executor"
+
+
+def test_cli_mcp_generate_config_zcode_uses_native_shape():
+    """ZCode uses its native mcp.servers config and external-agent executor mode."""
+    from artemis.interfaces.cli.commands.mcp import _get_config_snippet
+
+    result = runner.invoke(app, ["mcp", "--generate-config", "zcode"])
+    assert result.exit_code == 0
+    config = _get_config_snippet("zcode", "python", "/project")
+    server_config = config["mcp"]["servers"]["artemis"]
+    assert server_config["command"] == "python"
+    assert server_config["enable"] is True
+    assert "cwd" not in server_config
+    assert server_config["env"]["ARTEMIS_AGENT_CLIENT"] == "zcode"
+    assert server_config["env"]["ARTEMIS_EXECUTION_MODE"] == "executor"
+    assert server_config["env"]["ARTEMIS_EXECUTOR_ONLY"] == "1"
+    assert server_config["env"]["ARTEMIS_AUTO_START_UI"] == "true"
+
+
+def test_cli_mcp_execution_mode_is_independent_from_agent():
+    """Both supported development agents can explicitly select autonomous mode."""
+    from artemis.interfaces.cli.commands.mcp import _get_config_snippet
+
+    codex = _get_config_snippet("codex", "python", "/project", "autonomous")
+    zcode = _get_config_snippet("zcode", "python", "/project", "autonomous")
+    codex_env = codex["mcp_servers"]["artemis"]["env"]
+    zcode_env = zcode["mcp"]["servers"]["artemis"]["env"]
+    assert codex_env["ARTEMIS_EXECUTION_MODE"] == "autonomous"
+    assert zcode_env["ARTEMIS_EXECUTION_MODE"] == "autonomous"
+    assert codex_env["ARTEMIS_EXECUTOR_ONLY"] == "0"
+    assert zcode_env["ARTEMIS_EXECUTOR_ONLY"] == "0"
+    assert "ARTEMIS_AUTO_START_UI" not in codex_env
+    assert "ARTEMIS_AUTO_START_UI" not in zcode_env
 
 
 def test_cli_mcp_install_antigravity(tmp_path, monkeypatch):
@@ -282,6 +327,7 @@ def test_cli_mcp_install_all(tmp_path, monkeypatch):
     assert (tmp_path / ".openclaw" / "openclaw.json").exists()
     assert (tmp_path / ".claude.json").exists()
     assert (tmp_path / ".codex" / "config.toml").exists()
+    assert (tmp_path / ".zcode" / "cli" / "config.json").exists()
 
     import json
 
@@ -305,6 +351,9 @@ def test_cli_mcp_install_all(tmp_path, monkeypatch):
 
     openclaw_data = json.loads((tmp_path / ".openclaw" / "openclaw.json").read_text())
     assert openclaw_data["mcp"]["servers"]["artemis"]["enabled"] is True
+
+    zcode_data = json.loads((tmp_path / ".zcode" / "cli" / "config.json").read_text())
+    assert zcode_data["mcp"]["servers"]["artemis"]["enable"] is True
 
     cline_data = json.loads(
         (tmp_path / ".cline" / "data" / "settings" / "cline_mcp_settings.json").read_text()
@@ -333,6 +382,36 @@ def test_cli_mcp_install_all(tmp_path, monkeypatch):
     assert (tmp_path / ".openclaw" / "OPENCLAW.md").exists()
     assert (tmp_path / ".openclaw" / "rules" / "artemis.md").exists()
     assert (tmp_path / ".codex" / "AGENTS.md").exists()
+    assert (tmp_path / ".zcode" / "AGENTS.md").exists()
+
+
+def test_cli_mcp_install_zcode_preserves_config_and_is_idempotent(tmp_path, monkeypatch):
+    """ZCode installation preserves unrelated native settings and rules."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("mcp_server.utils.env_utils.get_project_root", lambda: str(tmp_path))
+    config_file = tmp_path / ".zcode" / "cli" / "config.json"
+    config_file.parent.mkdir(parents=True)
+    config_file.write_text(
+        '{"theme":"dark","mcp":{"servers":{"existing":{"command":"echo"}}}}',
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["mcp", "--install", "zcode", "--mode", "executor"])
+    result2 = runner.invoke(app, ["mcp", "--install", "zcode", "--mode", "executor"])
+    assert result.exit_code == 0
+    assert result2.exit_code == 0
+
+    import json
+
+    data = json.loads(config_file.read_text(encoding="utf-8"))
+    assert data["theme"] == "dark"
+    assert data["mcp"]["servers"]["existing"]["command"] == "echo"
+    artemis = data["mcp"]["servers"]["artemis"]
+    assert artemis["enable"] is True
+    assert artemis["env"]["ARTEMIS_AGENT_CLIENT"] == "zcode"
+    assert artemis["env"]["ARTEMIS_EXECUTION_MODE"] == "executor"
+    rules = (tmp_path / ".zcode" / "AGENTS.md").read_text(encoding="utf-8")
+    assert rules.count("<!-- BEGIN ARTEMIS MOBILE TESTING RULES -->") == 1
 
 
 def test_cli_mcp_install_claude_migrates_legacy_claude_md(tmp_path, monkeypatch):
@@ -428,6 +507,10 @@ def test_cli_mcp_install_codex_preserves_config_and_is_idempotent(tmp_path, monk
     assert data["mcp_servers"]["artemis"]["required"] is True
     assert data["mcp_servers"]["artemis"]["startup_timeout_sec"] == 120
     assert data["mcp_servers"]["artemis"]["enabled_tools"] == [
+        "mobile_session",
+        "mobile_observe",
+        "mobile_act",
+        "mobile_verify",
         "mobile_run_task",
         "mobile_manage_task",
         "mobile_get_device_state",
@@ -435,6 +518,10 @@ def test_cli_mcp_install_codex_preserves_config_and_is_idempotent(tmp_path, monk
         "mobile_diagnose",
     ]
     assert data["mcp_servers"]["artemis"]["env"]["PYTHONPATH"] == str(tmp_path)
+    assert data["mcp_servers"]["artemis"]["env"]["ARTEMIS_EXECUTOR_ONLY"] == "1"
+    assert data["mcp_servers"]["artemis"]["env"]["ARTEMIS_AUTO_START_UI"] == "true"
+    assert data["mcp_servers"]["artemis"]["env"]["ARTEMIS_UI_PORT"] == "8000"
+    assert data["mcp_servers"]["artemis"]["env"]["ARTEMIS_AUTO_OPEN_BROWSER"] == "false"
     assert config_text.count("# BEGIN ARTEMIS MCP CONFIG") == 1
 
     agents_file = codex_dir / "AGENTS.md"

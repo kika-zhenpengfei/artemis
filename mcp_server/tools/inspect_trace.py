@@ -61,12 +61,12 @@ async def mobile_inspect_trace(
     """Retrieves execution details of a mobile automation task (running or finished).
 
     Use it to monitor progress, verify answers, and diagnose agent errors for
-    both Flash and Pro tasks. Every result includes the assigned `device_serial`.
+    Codex, ZCode, Flash, and Pro tasks. Every result includes the assigned `device_serial`.
 
     ### Actions
     - **'view_summary'**: High-level execution summary across all steps.
-      Pro: hierarchical task plan with per-step status; Flash: full execution
-      chain with each step's reasoning and action.
+      Pro: hierarchical task plan with per-step status; external Agent/Flash: full
+      execution chain with each observation, action, and verification.
     - **'search'**: Deterministic keyword / step-range lookup over the full
       stored history (screen descriptions, exact actions and results,
       reasoning, tool calls, notes, on-screen OCR/UI-tree text incl.
@@ -82,8 +82,8 @@ async def mobile_inspect_trace(
       own context showed it: what the screen showed, its reasoning, every tool
       call it made (name, arguments, result — e.g. what the explorer or OCR
       reported), the planned action, any safety-net interception and the
-      execution result. Coordinates are normalized [x, y]. Works for Flash and
-      Pro tasks.
+      execution result. Coordinates are normalized [x, y]. Works for Codex,
+      ZCode, Flash, and Pro tasks.
 
     Args:
         action: `"view_summary"`, `"search"`, `"view_step_screenshots"`, or
@@ -183,7 +183,8 @@ async def mobile_inspect_trace(
             }
 
         status_data = trace_store.read_status(trace_id)
-        is_flash = status_data and status_data.get("model", "").lower() == "flash"
+        model_name = str((status_data or {}).get("model") or "").lower()
+        is_linear = model_name in {"codex", "zcode", "flash"}
         device_serial = status_data.get("device_serial") if status_data else None
         if not device_serial and os.path.exists(db_path):
             try:
@@ -210,10 +211,15 @@ async def mobile_inspect_trace(
 
         device_info_str = f" | **Device Serial:** `{device_serial}`" if device_serial else ""
 
-        if is_flash:
+        if is_linear:
+            display_model = {
+                "codex": "Codex",
+                "zcode": "ZCode",
+                "flash": "Flash",
+            }[model_name]
             summary_lines = [
-                "# ARTEMIS Flash Execution Summary",
-                f"**Session ID:** `{trace_id}` | **Model:** Flash{device_info_str}\n",
+                f"# ARTEMIS {display_model} Execution Summary",
+                f"**Session ID:** `{trace_id}` | **Model:** {display_model}{device_info_str}\n",
                 "---",
                 "## Step-by-Step Execution Chain\n",
             ]

@@ -35,7 +35,7 @@
 
 * **Cross-App Automation**: Executes testing workflows and everyday tasks on Android from natural language instructions.
 * **Multimodal Targeting**: Uses element indices when available, with coordinate and visual locating fallbacks for custom interfaces.
-* **IDE Diagnostics**: **Model Context Protocol (MCP)** integration lets **Antigravity, Claude Code, and Windsurf** drive test devices and collect **Logcat** output and screenshots.
+* **IDE Diagnostics**: **Model Context Protocol (MCP)** integration lets **Codex, ZCode**, and other supported Agents drive test devices and collect **Logcat** output and screenshots.
 * **Flash Execution**: A reactive observe-and-act loop with asynchronous history summaries, typically **3–5s per step**.
 * **Pro Exploration**: Checks targets before individual actions and returns blocked actions to the Operator for recovery. Supports long-running exploratory and stability tests.
 * **AndroidWorld Results**: **99%+ task completion** on Google Research's **AndroidWorld** benchmark (100+ multi-step tasks).
@@ -77,7 +77,7 @@
 
 Ensure an Android device (with **USB Debugging** enabled) or emulator is connected. The one-click startup script will automatically:
 - **Install System Toolchains**: Detect and auto-install ADB, scrcpy, FFmpeg, and Python (`uv`) dependencies.
-- **Mount Global MCP Server & AI Agent Rules**: Prompt to automatically install global MCP configurations and the **Artemis Mobile Testing Mindset (`rules.md`)** into your AI IDEs (**Antigravity**, **Cursor**, **Claude Code**, **Codex**, **Windsurf**, **VS Code**, **Cline/Roo**, **OpenClaw**).
+- **Mount Global MCP Server & AI Agent Rules**: Prompt to automatically install global MCP configurations and the **Artemis Mobile Testing Mindset (`rules.md`)** into your AI IDEs (**Codex**, **ZCode**, **Antigravity**, **Cursor**, **Claude Code**, **Windsurf**, **VS Code**, **Cline/Roo**, **OpenClaw**).
 
 ### macOS and Linux
 
@@ -107,7 +107,7 @@ cd artemis
 <a id="mcp-setup"></a>
 <a id="mcp"></a>
 <details>
-<summary><b>MCP Setup for Codex / Antigravity / Claude Code / Windsurf (Click to expand)</b></summary>
+<summary><b>MCP Setup for Codex / ZCode / Other Agents (Click to expand)</b></summary>
 
 <br>
 
@@ -118,12 +118,19 @@ ARTEMIS includes a native **Model Context Protocol (MCP)** server. Connect your 
 Running `./start.sh` (macOS/Linux) or `.\start.bat` (Windows PowerShell) will prompt you to configure global MCP and testing rules for detected IDEs (or you can install/update anytime later manually using the commands below):
 
 ```bash
-# Auto-install MCP server & global rules for Antigravity / Jetski:
-uv run artemis mcp --install antigravity
+# Current authenticated Codex session drives ARTEMIS device tools:
+uv run artemis mcp --install codex --mode executor
 
-# Or install for all supported AI IDEs (including Codex):
+# Current authenticated ZCode session drives the same ARTEMIS device tools:
+uv run artemis mcp --install zcode --mode executor
+
+# Or install for all supported AI IDEs:
 uv run artemis mcp --install all
 ```
+
+`executor` keeps planning and reasoning in the selected development agent, so
+ARTEMIS does not need its own LLM API key. Use `--mode autonomous` only when
+you intentionally want the legacy ARTEMIS Flash/Pro model path.
 
 > **Tip**: You can also configure MCP interactively during first-time setup via `uv run artemis init`.
 > **Pro Tip**: If you want to use the `artemis` command globally without `uv run` in any directory, run `uv tool install -e .` once in the project root.
@@ -142,7 +149,42 @@ cwd = "/path/to/artemis"
 [mcp_servers.artemis.env]
 PYTHONUNBUFFERED = "1"
 PYTHONPATH = "/path/to/artemis"
+ARTEMIS_EXECUTOR_ONLY = "1"
+ARTEMIS_AGENT_CLIENT = "codex"
+ARTEMIS_EXECUTION_MODE = "executor"
+ARTEMIS_AUTO_START_UI = "true"
+ARTEMIS_UI_PORT = "8000"
+ARTEMIS_AUTO_OPEN_BROWSER = "false"
 ```
+
+* **ZCode** (`~/.zcode/cli/config.json`):
+```json
+{
+  "mcp": {
+    "servers": {
+      "artemis": {
+        "command": "/path/to/artemis/.venv/bin/python",
+        "args": ["-m", "mcp_server"],
+        "env": {
+          "PYTHONUNBUFFERED": "1",
+          "PYTHONPATH": "/path/to/artemis",
+          "ARTEMIS_AGENT_CLIENT": "zcode",
+          "ARTEMIS_EXECUTION_MODE": "executor",
+          "ARTEMIS_EXECUTOR_ONLY": "1",
+          "ARTEMIS_AUTO_START_UI": "true",
+          "ARTEMIS_UI_PORT": "8000",
+          "ARTEMIS_AUTO_OPEN_BROWSER": "false"
+        },
+        "enable": true
+      }
+    }
+  }
+}
+```
+
+The installer also writes the managed mobile-testing rules to
+`~/.zcode/AGENTS.md`. Restart ZCode or start a new task after changing MCP or
+instruction configuration.
 
 * **Antigravity** (`~/.gemini/jetski/mcp_config.json`):
 ```json
@@ -156,6 +198,10 @@ PYTHONPATH = "/path/to/artemis"
         "PYTHONUNBUFFERED": "1"
       },
       "tools": {
+        "mobile_session": { "eager": true },
+        "mobile_observe": { "eager": true },
+        "mobile_act": { "eager": true },
+        "mobile_verify": { "eager": true },
         "mobile_run_task": { "eager": true },
         "mobile_manage_task": { "eager": true },
         "mobile_get_device_state": { "eager": true },
@@ -189,12 +235,13 @@ You can mount or copy [`mcp_server/rules.md`](./mcp_server/rules.md) into your A
 * **Claude Code**: Run `artemis mcp --install claude` to install the rules to `~/.claude/rules/artemis.md` (install to exactly one location — Claude Code loads both `~/.claude/CLAUDE.md` and `~/.claude/rules/*.md`, so duplicating the rules wastes context).
 * **Cursor**: Copy the contents into `.cursorrules` or create a rule file at `.cursor/rules/artemis.mdc`.
 * **Codex**: Add the contents to `~/.codex/AGENTS.md` (or the active `AGENTS.override.md`).
+* **ZCode**: Run `artemis mcp --install zcode --mode executor` to install the rules to `~/.zcode/AGENTS.md` and MCP configuration to `~/.zcode/cli/config.json`.
 * **Windsurf / OpenClaw**: Add the rules to your workspace rules or global system prompts.
 
 > For more details on the testing mindset and MCP architecture, see the [MCP Server README](./mcp_server/README.md).
 
 ### 4. Prompt Your Phone in the IDE Chat
-In Codex, Antigravity, or Claude Code, simply prompt:
+In Codex, ZCode, or another configured Agent, simply prompt:
 > *"Build the latest changes into an APK, install it on the connected device, open the login screen with a test account, verify if there are any unexpected popups after login, and return screenshots of the final page."*
 
 </details>

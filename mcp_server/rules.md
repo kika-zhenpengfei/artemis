@@ -2,6 +2,12 @@
 
 Write executable tests based on device behavior verified with **ARTEMIS**. Before authoring a test, explore the target application and confirm its screens, transitions, and interactions. Use ARTEMIS device actions or ADB commands to investigate software and hardware behavior instead of assuming how an interaction works.
 
+### 0. External Development-Agent Executor (Preferred When Available)
+- When `mobile_session`, `mobile_observe`, `mobile_act`, and `mobile_verify` are available, the current authenticated development-agent session (for example Codex or ZCode) owns planning and reasoning; ARTEMIS only leases the device, executes actions, captures observations, and persists evidence. This mode does not require an ARTEMIS-side LLM API key.
+- Use this lifecycle: `mobile_session(operation="open")` → `mobile_observe` → repeated `mobile_act` / `mobile_observe` → `mobile_verify` → `mobile_session(operation="close")`. Always close the session, including after failures, so the device lock and WebUI session are finalized.
+- Pass the latest `observation_id` to every screen-targeted action. Prefer an indexed element target such as `{"target": 3}`; use normalized 0–1000 coordinates plus `target_description` only as a fallback.
+- Use `mobile_run_task` only for the legacy autonomous Flash/Pro path where ARTEMIS calls its own configured LLM provider.
+
 ### 1. The Runnable Code Principle & ARTEMIS Exploration
 - **When tasked with authoring tests**, deliver runnable test code with verified interactions and explicit wait conditions.
 - Before writing any test code, you must use the ARTEMIS MCP tools to interactively run and explore the target application. This allows you to discover the exact sequence of UI states, transitions, and required interactions.
@@ -32,7 +38,7 @@ Deeply understand and select between ARTEMIS's dual execution models (**ARTEMIS 
 
 ### 3. Device & Environment Constraints & Multi-Device Management
 - **Device Selection & Multi-Device Execution**: ARTEMIS supports multi-device execution and per-device concurrency. You can control device targeting via two modes:
-  - **Direct Device Specification**: Explicitly provide the target phone's serial number via `device_serial` to `mobile_run_task` or `mobile_get_device_state`. Tasks targeting distinct devices run concurrently without blocking each other.
+  - **Direct Device Specification**: Explicitly provide the target phone's serial number via `device_serial` to `mobile_session`, `mobile_run_task`, or `mobile_get_device_state`. Tasks targeting distinct devices run concurrently without blocking each other.
   - **Automatic Device Selection**: When `device_serial` is omitted or set to `None`, ARTEMIS automatically selects an available connected device or allocates an idle device from the device pool.
 - **Prioritize User Choice for Device Selection**:
   - When multiple connected devices or emulators are detected, or whenever device selection is ambiguous, **YOU MUST PRIORITIZE ASKING THE USER** to select or confirm their preferred device serial before launching a task.
@@ -62,7 +68,7 @@ Deeply understand and select between ARTEMIS's dual execution models (**ARTEMIS 
 - **Let ARTEMIS self-heal first**: Call `mobile_diagnose(attempt_fix=true)` before asking for manual ADB intervention; it regenerates corrupted ADB RSA keys, restarts the ADB server when that is safe (no device ready, no task holding a device), and removes stale device locks / queue tickets left behind by crashed runners.
 - **Deeper checks on demand**: `verify_credentials=true` validates the configured API keys live (~12s; use when a key exists but tasks fail with auth / quota errors; result in `credentials`). `probe_device=true` runs a true end-to-end check — screenshot plus UI hierarchy through UIAutomator (~20s; use when the device shows connected but observation or tasks fail; result in `device_probe`).
 - **Emulators**: `launch_avd="<name>"` starts an installed Android Virtual Device in the background via ARTEMIS's emulator manager and returns immediately; boot takes 1-3 minutes, so re-run `mobile_diagnose` after ~60s. Never run `emulator -avd` in the shell yourself — it is a foreground process and hangs the shell.
-- **Busy devices**: `tasks: {active, queued}` lists tasks currently holding or waiting for devices. A busy device means wait, or stop the task with `mobile_manage_task(action="stop", trace_id=...)`.
-- **Credentials never go through the chat**: If the LLM key is missing, ask the user to add it to the `.env` file at the path the report shows (`host.env_file`) or to the MCP server's `env` block, then to restart the MCP server. `artemis init` is interactive and cannot be driven from a tool call.
+- **Busy devices**: `tasks: {active, queued}` lists tasks currently holding or waiting for devices. Close an external-agent lease with `mobile_session(operation="close", session_id=...)`; stop only legacy autonomous tasks with `mobile_manage_task(action="stop", trace_id=...)`.
+- **Credentials never go through the chat**: In executor mode, the current development-agent session supplies reasoning and no ARTEMIS-side LLM key is required. In legacy autonomous mode, if the LLM key is missing, ask the user to add it to the `.env` file at the path the report shows (`host.env_file`) or to the MCP server's `env` block, then to restart the MCP server. `artemis init` is interactive and cannot be driven from a tool call.
 - **Restart after configuration changes**: Settings are read when the server starts. After editing `.env`, `config/artemis.jsonc`, or the MCP client configuration, reload the MCP server in the IDE before calling `mobile_diagnose` again; otherwise it reports the old state.
 - **Failed tasks**: `logs.last_failed_task` gives the trace id, its `stderr_log`, and `recent_errors` (the error lines from that stderr, so you need not open the file); read them before re-running the task. Repeat `mobile_diagnose` until `verdict` is `ready` or `degraded` before delegating tasks again (`degraded` means tasks can run but something optional is off: video tools, the OCR key, a secondary credential, or a host warning such as an interpreter mismatch or a squatted daemon port; relay its `[OPTIONAL]` steps to the user, do not loop on them).

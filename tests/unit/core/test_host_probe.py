@@ -39,7 +39,7 @@ _SIGNAL_PREFIXES = (
     "ROO_",
     "VSCODE_",
 )
-_SIGNAL_KEYS = ("CLAUDECODE", "TERM_PROGRAM")
+_SIGNAL_KEYS = ("ARTEMIS_AGENT_CLIENT", "CLAUDECODE", "TERM_PROGRAM")
 
 
 @pytest.fixture
@@ -217,6 +217,7 @@ def test_detect_mcp_client_unknown_in_clean_environment(clean_ide_env):
         ({"WINDSURF_SESSION": "x"}, "windsurf"),
         ({"CODEX_SANDBOX": "seatbelt"}, "codex"),
         ({"CODEX_HOME": "/tmp/codex", "CODEX_SANDBOX_NETWORK_DISABLED": "1"}, "codex"),
+        ({"ARTEMIS_AGENT_CLIENT": "zcode"}, "zcode"),
         ({"OPENCLAW_SESSION_ID": "s"}, "openclaw"),
         ({"CLINE_TASK_ID": "1"}, "cline"),
         ({"ROO_CODE_TASK": "1"}, "roo"),
@@ -272,7 +273,7 @@ def test_mcp_install_actions_shapes():
 
     (hint,) = host_probe.mcp_install_actions(None)
     assert hint.action_type == "hint"
-    assert "antigravity, claude, cursor, windsurf, vscode, cline, roo, openclaw, codex" in (
+    assert "antigravity, claude, cursor, windsurf, vscode, cline, roo, openclaw, codex, zcode" in (
         hint.payload
     )
 

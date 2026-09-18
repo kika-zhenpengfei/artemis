@@ -444,6 +444,7 @@ def test_ready_environment_reports_ready_with_slim_shape(temp_trace_env):
     result = _run(_healthy_probes(), report=_report(_healthy_probes(), active_device=device))
 
     assert result["verdict"] == "ready"
+    assert result["execution_mode"] == "autonomous"
     assert "overall_ready" not in result
     assert "active_device" not in result
     assert result["next_steps"] == [
@@ -488,6 +489,33 @@ def test_ready_environment_reports_ready_with_slim_shape(temp_trace_env):
             "log_path": "/logs/daemon.log",
         },
     }
+
+
+def test_executor_only_mode_does_not_require_an_artemis_llm_key(temp_trace_env, monkeypatch):
+    monkeypatch.setenv("ARTEMIS_EXECUTOR_ONLY", "1")
+    monkeypatch.setenv("ARTEMIS_AGENT_CLIENT", "codex")
+    probes = _healthy_probes()
+    probes[3] = _probe(
+        "gemini_api_key",
+        ProbeStatus.FAIL,
+        category=ProbeCategory.CREDENTIALS,
+        description="No provider API key is configured.",
+    )
+    device = DeviceInfo(serial="pixel-1", model="Pixel 8", android_version="15")
+
+    result = _run(probes, report=_report(probes, active_device=device))
+
+    assert result["verdict"] == "ready"
+    assert result["agent_client"] == "codex"
+    assert result["execution_mode"] == "executor"
+    credential = next(check for check in result["checks"] if check["id"] == "gemini_api_key")
+    assert credential["status"] == "pass"
+    assert credential["required"] is False
+    assert result["next_steps"] == [
+        "Environment is ready. Open a current-Codex device lease with "
+        "mobile_session(operation='open'); pass device_serial when more than one "
+        "device is attached."
+    ]
     assert result["emulator"] is None
     assert result["credentials"] is None
     assert result["device_probe"] is None

@@ -798,7 +798,8 @@ export class AgentService {
       'session_ended',
       'recording_ready',
       'recording_failed',
-      'checker_event'
+      'checker_event',
+      'verification_recorded'
     ];
 
     eventTypes.forEach((eventType) => {

@@ -484,6 +484,16 @@ def mobile_manage_task(
         return response
 
     elif action == "stop":
+        if str(status_data.get("model") or "").lower() in {"codex", "zcode"}:
+            return {
+                "trace_id": trace_id,
+                "status": current_status,
+                "message": (
+                    "This task is owned by the long-lived Artemis MCP process. "
+                    "Close it with mobile_session(operation='close', session_id=trace_id, "
+                    "status='cancelled') instead of terminating the MCP server."
+                ),
+            }
         if current_status not in ("running", "pending"):
             return {
                 "trace_id": trace_id,

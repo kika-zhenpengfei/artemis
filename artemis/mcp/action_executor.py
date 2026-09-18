@@ -169,6 +169,7 @@ class McpActionExecutor:
         img_bytes: bytes | None = None
         shot_path: str | None = None
         xml_list: str | None = None
+        hierarchy_ok: bool | None = None
         target_semantics: dict[str, Any] = {}
         target_coordinates: list[int] | None = None
         with span:
@@ -200,6 +201,7 @@ class McpActionExecutor:
                     if obs.ok:
                         shot_path = obs.screenshot_path
                         xml_list = obs.elements_text
+                        hierarchy_ok = obs.hierarchy_ok
                         if obs.hierarchy_ok:
                             state.indexed_points = [el["center"] for el in obs.elements]
                             state.indexed_elements = obs.elements
@@ -247,6 +249,7 @@ class McpActionExecutor:
                 "normalized_coordinates": res.normalized_coordinates,
                 "target_semantics": target_semantics,
                 "target_coordinates": target_coordinates,
+                "hierarchy_ok": hierarchy_ok,
             },
         )
 

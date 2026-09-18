@@ -21,7 +21,7 @@ import re
 import sys
 import threading
 import tomllib
-from typing import Annotated
+from typing import Annotated, Protocol
 
 from mcp_server.base import mcp as agent_mcp
 import mcp_server.tools  # noqa: F401
@@ -37,12 +37,100 @@ logger = get_logger(__name__)
 console = Console()
 
 ARTEMIS_MCP_TOOLS = (
+    "mobile_session",
+    "mobile_observe",
+    "mobile_act",
+    "mobile_verify",
     "mobile_run_task",
     "mobile_manage_task",
     "mobile_get_device_state",
     "mobile_inspect_trace",
     "mobile_diagnose",
 )
+
+EXECUTION_MODES = frozenset({"executor", "autonomous"})
+
+
+class DevelopmentAgentAdapter(Protocol):
+    """Seam for development-agent-specific MCP configuration."""
+
+    client_id: str
+    aliases: tuple[str, ...]
+    default_execution_mode: str
+
+    def build_config(self, config_body: dict, config_with_cwd: dict) -> dict: ...
+
+
+class CodexAgentAdapter:
+    client_id = "codex"
+    aliases = ("codex",)
+    default_execution_mode = "executor"
+
+    def build_config(self, config_body: dict, config_with_cwd: dict) -> dict:
+        return {
+            "mcp_servers": {
+                "artemis": {
+                    **config_with_cwd,
+                    # Codex has no eager/deferred MCP setting. Requiring the
+                    # server makes it initialize during host startup, while an
+                    # explicit allow-list guarantees all Artemis tools are
+                    # registered. The host may still present schemas through
+                    # tool search to control context size.
+                    "enabled": True,
+                    "required": True,
+                    "startup_timeout_sec": 120,
+                    "enabled_tools": list(ARTEMIS_MCP_TOOLS),
+                }
+            }
+        }
+
+
+class ZCodeAgentAdapter:
+    client_id = "zcode"
+    aliases = ("zcode", "z_code")
+    default_execution_mode = "executor"
+
+    def build_config(self, config_body: dict, config_with_cwd: dict) -> dict:
+        # ZCode's native user config uses mcp.servers. PYTHONPATH and the
+        # absolute interpreter path make cwd unnecessary and portable across
+        # workspaces opened by the desktop app.
+        return {
+            "mcp": {
+                "servers": {
+                    "artemis": {
+                        **config_body,
+                        "enable": True,
+                    }
+                }
+            }
+        }
+
+
+_DEVELOPMENT_AGENT_ADAPTERS: tuple[DevelopmentAgentAdapter, ...] = (
+    CodexAgentAdapter(),
+    ZCodeAgentAdapter(),
+)
+_DEVELOPMENT_AGENT_BY_ALIAS = {
+    alias: adapter for adapter in _DEVELOPMENT_AGENT_ADAPTERS for alias in adapter.aliases
+}
+
+
+def _canonical_client(client: str) -> str:
+    normalized = client.strip().lower().replace("-", "_")
+    adapter = _DEVELOPMENT_AGENT_BY_ALIAS.get(normalized)
+    return adapter.client_id if adapter else normalized
+
+
+def _resolve_execution_mode(client: str, execution_mode: str | None) -> str:
+    """Resolve execution mode independently from the selected client."""
+    if execution_mode is not None:
+        normalized_mode = execution_mode.strip().lower()
+        if normalized_mode not in EXECUTION_MODES:
+            raise ValueError("execution_mode must be 'executor' or 'autonomous'")
+        return normalized_mode
+
+    adapter = _DEVELOPMENT_AGENT_BY_ALIAS.get(client)
+    return adapter.default_execution_mode if adapter else "autonomous"
 
 
 def _eager_tools_config() -> dict[str, dict[str, bool]]:
@@ -61,18 +149,43 @@ def _get_vscode_user_dir() -> Path:
         return Path.home() / ".config" / "Code" / "User"
 
 
-def _get_config_snippet(client: str, python_exe: str, project_root: str) -> dict:
+def _get_config_snippet(
+    client: str,
+    python_exe: str,
+    project_root: str,
+    execution_mode: str | None = None,
+) -> dict:
     """Generates MCP configuration dictionary for the specified client."""
+    client = _canonical_client(client)
+    resolved_mode = _resolve_execution_mode(client, execution_mode)
+    executor_only = resolved_mode == "executor"
+    server_env = {
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONPATH": project_root,
+        "ARTEMIS_DESKTOP_NOTIFY": "true",
+        "ARTEMIS_AGENT_CLIENT": client,
+        "ARTEMIS_EXECUTION_MODE": resolved_mode,
+        # Keep the old flag during migration for older server builds.
+        "ARTEMIS_EXECUTOR_ONLY": "1" if executor_only else "0",
+    }
+    if executor_only:
+        server_env.update(
+            {
+                "ARTEMIS_AUTO_START_UI": "true",
+                "ARTEMIS_UI_PORT": "8000",
+                "ARTEMIS_AUTO_OPEN_BROWSER": "false",
+            }
+        )
     config_body = {
         "command": python_exe,
         "args": ["-m", "mcp_server"],
-        "env": {
-            "PYTHONUNBUFFERED": "1",
-            "PYTHONPATH": project_root,
-            "ARTEMIS_DESKTOP_NOTIFY": "true",
-        },
+        "env": server_env,
     }
     config_with_cwd = {**config_body, "cwd": project_root}
+
+    development_agent = _DEVELOPMENT_AGENT_BY_ALIAS.get(client)
+    if development_agent:
+        return development_agent.build_config(config_body, config_with_cwd)
 
     if client == "antigravity":
         return {
@@ -108,23 +221,6 @@ def _get_config_snippet(client: str, python_exe: str, project_root: str) -> dict
                         "enabled": True,
                         "connectionTimeoutMs": 120000,
                     }
-                }
-            }
-        }
-    elif client == "codex":
-        return {
-            "mcp_servers": {
-                "artemis": {
-                    **config_with_cwd,
-                    # Codex has no eager/deferred MCP setting. Requiring the
-                    # server makes it initialize during host startup, while an
-                    # explicit allow-list guarantees all Artemis tools are
-                    # registered. The host may still present schemas through
-                    # tool search to control context size.
-                    "enabled": True,
-                    "required": True,
-                    "startup_timeout_sec": 120,
-                    "enabled_tools": list(ARTEMIS_MCP_TOOLS),
                 }
             }
         }
@@ -272,9 +368,12 @@ def _codex_toml_block(server_config: dict) -> str:
     if "startup_timeout_sec" in server_config:
         lines.append(f"startup_timeout_sec = {int(server_config['startup_timeout_sec'])}")
     if "enabled_tools" in server_config:
-        lines.append(
-            f"enabled_tools = {json.dumps(server_config['enabled_tools'], ensure_ascii=False)}"
+        lines.append("enabled_tools = [")
+        lines.extend(
+            f"  {json.dumps(tool_name, ensure_ascii=False)},"
+            for tool_name in server_config["enabled_tools"]
         )
+        lines.append("]")
     if env:
         lines.extend(["", "[mcp_servers.artemis.env]"])
         for key, value in env.items():
@@ -445,6 +544,7 @@ def _write_cursor_mdc(file_path: Path, content: str) -> bool:
 
 def install_rules(client: str, project_root: str) -> list[str]:
     """Auto-installs ARTEMIS testing rules globally into user IDE rule directories across any OS."""
+    client = _canonical_client(client)
     installed_paths: list[str] = []
     rules_src = Path(project_root) / "mcp_server" / "rules.md"
     if not rules_src.exists():
@@ -472,6 +572,7 @@ def install_rules(client: str, project_root: str) -> list[str]:
             "roo",
             "openclaw",
             "codex",
+            "zcode",
         ]
         if client == "all"
         else [client]
@@ -553,12 +654,22 @@ def install_rules(client: str, project_root: str) -> list[str]:
             )
             if _inject_rules_block(agents_file, raw_rules):
                 installed_paths.append(str(agents_file))
+        elif target == "zcode":
+            agents_file = Path.home() / ".zcode" / "AGENTS.md"
+            if _inject_rules_block(agents_file, raw_rules):
+                installed_paths.append(str(agents_file))
 
     return installed_paths
 
 
-def install_mcp_config(client: str, python_exe: str, project_root: str) -> list[str]:
+def install_mcp_config(
+    client: str,
+    python_exe: str,
+    project_root: str,
+    execution_mode: str | None = None,
+) -> list[str]:
     """Auto-installs/merges ARTEMIS MCP configuration and testing rules into IDE config files across any OS."""
+    client = _canonical_client(client)
     installed_paths: list[str] = []
     targets = (
         [
@@ -571,20 +682,26 @@ def install_mcp_config(client: str, python_exe: str, project_root: str) -> list[
             "roo",
             "openclaw",
             "codex",
+            "zcode",
         ]
         if client == "all"
         else [client]
     )
 
     for target in targets:
-        snippet = _get_config_snippet(target, python_exe, project_root)
+        snippet = _get_config_snippet(
+            target,
+            python_exe,
+            project_root,
+            execution_mode=execution_mode,
+        )
         if target in ("antigravity", "jetski"):
-            current_server_cfg = _get_config_snippet("antigravity", python_exe, project_root)[
-                "mcpServers"
-            ]["artemis"]
-            legacy_server_cfg = _get_config_snippet("jetski", python_exe, project_root)[
-                "mcpServers"
-            ]["artemis"]
+            current_server_cfg = _get_config_snippet(
+                "antigravity", python_exe, project_root, execution_mode
+            )["mcpServers"]["artemis"]
+            legacy_server_cfg = _get_config_snippet(
+                "jetski", python_exe, project_root, execution_mode
+            )["mcpServers"]["artemis"]
             jetski_path = Path.home() / ".gemini" / "jetski" / "mcp_config.json"
             antigravity_legacy_path = Path.home() / ".gemini" / "antigravity" / "mcp_config.json"
             config_path = Path.home() / ".gemini" / "config" / "mcp_config.json"
@@ -680,6 +797,17 @@ def install_mcp_config(client: str, python_exe: str, project_root: str) -> list[
             codex_path = codex_home / "config.toml"
             if _merge_codex_toml(codex_path, server_cfg):
                 installed_paths.append(str(codex_path))
+        elif target == "zcode":
+            server_cfg = snippet["mcp"]["servers"]["artemis"]
+            zcode_path = Path.home() / ".zcode" / "cli" / "config.json"
+            if _merge_json_file(
+                zcode_path,
+                "artemis",
+                server_cfg,
+                key_name=("mcp", "servers"),
+                strict_parse=True,
+            ):
+                installed_paths.append(str(zcode_path))
 
     rules_paths = install_rules(client, project_root)
     installed_paths.extend(rules_paths)
@@ -727,7 +855,7 @@ def mcp_command(
         typer.Option(
             "--install",
             "-i",
-            help="Auto-install and merge ARTEMIS MCP configuration and testing rules into 'antigravity', 'claude', 'cursor', 'windsurf', 'vscode', 'cline', 'roo', 'openclaw', 'codex', or 'all'.",
+            help="Auto-install and merge ARTEMIS MCP configuration and testing rules into 'codex', 'zcode', another supported client, or 'all'.",
         ),
     ] = None,
     generate_config: Annotated[
@@ -735,7 +863,18 @@ def mcp_command(
         typer.Option(
             "--generate-config",
             "-g",
-            help="Output ready-to-use MCP configuration for 'antigravity', 'cursor', 'claude', 'windsurf', 'vscode', 'cline', 'roo', 'openclaw', 'codex', or 'all'.",
+            help="Output ready-to-use MCP configuration for 'codex', 'zcode', another supported client, or 'all'.",
+        ),
+    ] = None,
+    execution_mode: Annotated[
+        str | None,
+        typer.Option(
+            "--mode",
+            help=(
+                "ARTEMIS execution mode: 'executor' lets the selected development agent "
+                "drive device tools; 'autonomous' uses ARTEMIS Flash/Pro. "
+                "Codex and ZCode default to executor."
+            ),
         ),
     ] = None,
 ) -> None:
@@ -743,8 +882,15 @@ def mcp_command(
     project_root = env_utils.get_project_root()
     python_exe = env_utils.resolve_python_executable(project_root)
 
+    if execution_mode is not None and execution_mode.strip().lower() not in EXECUTION_MODES:
+        console.print(
+            f"[bold red]Unsupported execution mode: '{execution_mode}'. "
+            "Use 'executor' or 'autonomous'.[/bold red]"
+        )
+        raise typer.Exit(1)
+
     if install_config:
-        client = install_config.lower()
+        client = _canonical_client(install_config)
         if client not in (
             "antigravity",
             "jetski",
@@ -759,13 +905,19 @@ def mcp_command(
             "roo_code",
             "openclaw",
             "codex",
+            "zcode",
             "all",
         ):
             console.print(
-                f"[bold red]Unsupported install target: '{install_config}'. Use 'antigravity', 'claude', 'cursor', 'windsurf', 'vscode', 'cline', 'roo', 'openclaw', 'codex', or 'all'.[/bold red]"
+                f"[bold red]Unsupported install target: '{install_config}'. Use 'antigravity', 'claude', 'cursor', 'windsurf', 'vscode', 'cline', 'roo', 'openclaw', 'codex', 'zcode', or 'all'.[/bold red]"
             )
             raise typer.Exit(1)
-        installed_paths = install_mcp_config(client, python_exe, project_root)
+        installed_paths = install_mcp_config(
+            client,
+            python_exe,
+            project_root,
+            execution_mode=execution_mode,
+        )
         console.print(
             "[bold green]✔ Successfully installed ARTEMIS MCP server configuration & rules to:[/bold green]"
         )
@@ -777,45 +929,50 @@ def mcp_command(
         raise typer.Exit(0)
 
     if generate_config:
-        client = generate_config.lower()
+        client = _canonical_client(generate_config)
         if client == "all":
             all_configs = {
                 "antigravity (~/.gemini/jetski/mcp_config.json)": _get_config_snippet(
-                    "antigravity", python_exe, project_root
+                    "antigravity", python_exe, project_root, execution_mode
                 ),
                 "cursor (.cursor/mcp.json)": _get_config_snippet(
-                    "cursor", python_exe, project_root
+                    "cursor", python_exe, project_root, execution_mode
                 ),
                 "claude (claude_desktop_config.json & ~/.claude.json)": _get_config_snippet(
-                    "claude", python_exe, project_root
+                    "claude", python_exe, project_root, execution_mode
                 ),
                 "windsurf (~/.codeium/windsurf/mcp_config.json)": _get_config_snippet(
-                    "windsurf", python_exe, project_root
+                    "windsurf", python_exe, project_root, execution_mode
                 ),
-                "vscode (mcp.json)": _get_config_snippet("vscode", python_exe, project_root),
+                "vscode (mcp.json)": _get_config_snippet(
+                    "vscode", python_exe, project_root, execution_mode
+                ),
                 "cline (cline_mcp_settings.json)": _get_config_snippet(
-                    "cline", python_exe, project_root
+                    "cline", python_exe, project_root, execution_mode
                 ),
                 "roo (cline_mcp_settings.json)": _get_config_snippet(
-                    "roo", python_exe, project_root
+                    "roo", python_exe, project_root, execution_mode
                 ),
                 "openclaw (openclaw.json)": _get_config_snippet(
-                    "openclaw", python_exe, project_root
+                    "openclaw", python_exe, project_root, execution_mode
                 ),
                 "codex (~/.codex/config.toml)": _get_config_snippet(
-                    "codex", python_exe, project_root
+                    "codex", python_exe, project_root, execution_mode
+                ),
+                "zcode (~/.zcode/cli/config.json)": _get_config_snippet(
+                    "zcode", python_exe, project_root, execution_mode
                 ),
             }
             json_str = json.dumps(all_configs, indent=2)
             syntax_language = "json"
         elif client == "codex":
-            server_cfg = _get_config_snippet("codex", python_exe, project_root)["mcp_servers"][
-                "artemis"
-            ]
+            server_cfg = _get_config_snippet("codex", python_exe, project_root, execution_mode)[
+                "mcp_servers"
+            ]["artemis"]
             json_str = _codex_toml_block(server_cfg)
             syntax_language = "toml"
         else:
-            snippet = _get_config_snippet(client, python_exe, project_root)
+            snippet = _get_config_snippet(client, python_exe, project_root, execution_mode)
             json_str = json.dumps(snippet, indent=2)
             syntax_language = "json"
 

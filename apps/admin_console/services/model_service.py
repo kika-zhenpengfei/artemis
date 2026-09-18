@@ -23,6 +23,21 @@ logger = logging.getLogger(__name__)
 class ModelService:
     """Service handling agent architecture profile detection and metadata formatting."""
 
+    _EXTERNAL_AGENT_INFO = {
+        "codex": {
+            "name": "Codex",
+            "id": "current-codex-session",
+            "provider": "openai",
+            "architecture": "Codex + ARTEMIS DeviceExecution",
+        },
+        "zcode": {
+            "name": "ZCode",
+            "id": "current-zcode-session",
+            "provider": "z.ai",
+            "architecture": "ZCode + ARTEMIS DeviceExecution",
+        },
+    }
+
     # parse_llm_config re-reads and re-validates the config file on every call;
     # /api/sessions calls this once per session row, so cache (provider, model_id)
     # for a short TTL. Config edits take effect within _LLM_INFO_TTL seconds.
@@ -57,6 +72,12 @@ class ModelService:
     @classmethod
     def get_active_model_info(cls, profile: str | None = None) -> dict[str, str]:
         """Return active architecture and underlying LLM model configuration."""
+        if profile:
+            profile_lower = str(profile).lower()
+            for client, info in cls._EXTERNAL_AGENT_INFO.items():
+                if client in profile_lower:
+                    return dict(info)
+
         # 1. Determine underlying LLM model and provider from config (cached)
         provider, model_id = cls._get_llm_provider_and_model()
 
@@ -85,7 +106,7 @@ class ModelService:
         running_profile: str | None = None,
         agent_names: list[str] | None = None,
     ) -> str | None:
-        """Resolve the Artemis agent architecture profile ('flash' or 'pro') for a session."""
+        """Resolve an external-agent or ARTEMIS execution profile for a session."""
         sess_profile = None
         d_info_raw = row_dict.get("device_info")
         if d_info_raw:
@@ -95,6 +116,9 @@ class ModelService:
                     p = d_info.get("profile")
                     if p:
                         p_str = str(p).lower()
+                        for client in ModelService._EXTERNAL_AGENT_INFO:
+                            if client in p_str:
+                                return client
                         if "pro" in p_str:
                             return "pro"
                         elif "flash" in p_str:

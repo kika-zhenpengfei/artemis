@@ -86,6 +86,55 @@ _LAUNCH_IN_PROGRESS = frozenset({"starting", "waiting_for_adb", "booting"})
 _EMULATOR_LAUNCH_RE = re.compile(r"emulator(?:\.exe)?\s+-avd\s+(\S+)", re.IGNORECASE)
 
 
+def _executor_only_enabled() -> bool:
+    """Whether the outer development agent supplies device-execution reasoning."""
+    execution_mode = os.environ.get("ARTEMIS_EXECUTION_MODE", "").strip().lower()
+    if execution_mode in {"executor", "autonomous"}:
+        return execution_mode == "executor"
+    return os.environ.get("ARTEMIS_EXECUTOR_ONLY", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _external_agent_name() -> str:
+    value = os.environ.get("ARTEMIS_AGENT_CLIENT", "external agent").strip()
+    if not value:
+        return "external agent"
+    if value.lower() == "zcode":
+        return "ZCode"
+    return value.capitalize()
+
+
+def _apply_executor_only_policy(results: list[ProbeResult]) -> list[ProbeResult]:
+    """Make an Artemis-side LLM key optional when an external agent orchestrates."""
+    if not _executor_only_enabled():
+        return results
+    adjusted: list[ProbeResult] = []
+    for result in results:
+        if result.id != "gemini_api_key":
+            adjusted.append(result)
+            continue
+        adjusted.append(
+            result.model_copy(
+                update={
+                    "status": ProbeStatus.PASS,
+                    "is_blocker": False,
+                    "summary": f"Provided by current {_external_agent_name()} session",
+                    "description": (
+                        f"Executor mode uses the authenticated outer {_external_agent_name()} "
+                        "session; "
+                        "Artemis does not call an LLM provider."
+                    ),
+                    "actions": [],
+                }
+            )
+        )
+    return adjusted
+
+
 # --------------------------------------------------------------------------- #
 # Rendering helpers
 # --------------------------------------------------------------------------- #
@@ -732,6 +781,7 @@ def _next_steps(
     tasks: dict[str, list[dict[str, Any]]],
     device_probe: dict[str, Any] | None,
     accessibility_helper: dict[str, Any] | None = None,
+    executor_only: bool = False,
 ) -> list[str]:
     steps: list[str] = []
     needs_restart = False
@@ -792,10 +842,17 @@ def _next_steps(
         steps.append(f"Auto-fix {fix['fix']} {outcome}: {fix.get('message', '')}".rstrip())
 
     if not steps:
-        steps.append(
-            "Environment is ready. Use mobile_run_task to delegate a task; pass device_serial "
-            "when more than one device is attached."
-        )
+        if executor_only:
+            steps.append(
+                f"Environment is ready. Open a current-{_external_agent_name()} device lease with "
+                "mobile_session(operation='open'); pass device_serial when more than one "
+                "device is attached."
+            )
+        else:
+            steps.append(
+                "Environment is ready. Use mobile_run_task to delegate a task; pass "
+                "device_serial when more than one device is attached."
+            )
         return steps
 
     if needs_restart:
@@ -1066,6 +1123,8 @@ def _summary(
 
 def _timeout_response(fixes_applied: list[dict[str, Any]]) -> dict[str, Any]:
     return {
+        "agent_client": os.environ.get("ARTEMIS_AGENT_CLIENT"),
+        "execution_mode": "executor" if _executor_only_enabled() else "autonomous",
         "verdict": "blocked",
         "summary": (
             f"Diagnosis did not finish within {DIAGNOSIS_TIMEOUT_SECONDS:.0f}s; the ADB "
@@ -1103,7 +1162,7 @@ async def mobile_diagnose(
     start, no device is found, or the user says ARTEMIS "does not work".
     It checks, in fix order: Python runtime, config file, the MCP host
     (interpreter vs project venv, .env location, traces directory, daemon
-    port), LLM credentials, ADB + devices (authorization, lock screen, RSA
+    port), LLM credentials when autonomous mode needs them, ADB + devices (authorization, lock screen, RSA
     keys, emulators), and the optional video toolchain. A plain call takes a
     few seconds; the optional extras cost more (see Args).
 
@@ -1137,8 +1196,10 @@ async def mobile_diagnose(
         waiting_for_adb / booting while it boots, then ready or failed.
       - `tasks`: {"active": [...], "queued": [...]} ARTEMIS tasks holding or
         waiting for a device (device, session_id, pid, description, ingress,
-        started_at/created_at). Stop a stuck one with
-        mobile_manage_task(action="stop", trace_id=<session_id>).
+        started_at/created_at). Close an external-agent lease with
+        mobile_session(operation="close", session_id=<session_id>); stop a
+        legacy autonomous task with mobile_manage_task(action="stop",
+        trace_id=<session_id>).
       - `credentials`: null unless verify_credentials; else
         [{provider, label, valid, message}] per configured key.
       - `device_probe`: null unless probe_device; else {ok, serial,
@@ -1171,7 +1232,9 @@ async def mobile_diagnose(
           against its provider over the network (about 12 seconds worst
           case, keys stay on the server). Use it when tasks fail with
           authentication, quota or model errors although the key check
-          passes. An invalid primary key makes the verdict "blocked".
+          passes. An invalid primary key makes the verdict "blocked". This is
+          ignored in executor mode because the outer development-agent session owns
+          reasoning and Artemis does not call a model provider.
         probe_device: When true, drives the attached device end to end
           (screenshot + UI hierarchy, about 20 seconds) to prove a task can
           really start. Use it when the checks pass but tasks still fail on
@@ -1193,13 +1256,14 @@ async def mobile_diagnose(
                 report, host = await asyncio.wait_for(
                     collect_readiness(), timeout=DIAGNOSIS_TIMEOUT_SECONDS
                 )
-        results = [*report.probes, host]
+        executor_only = _executor_only_enabled()
+        results = _apply_executor_only_policy([*report.probes, host])
         extras = await asyncio.wait_for(
             _run_extras(
                 results,
                 requested_device=requested_device,
                 launch_avd=avd_name,
-                verify_credentials=verify_credentials,
+                verify_credentials=verify_credentials and not executor_only,
                 probe_device=probe_device,
             ),
             timeout=DIAGNOSIS_TIMEOUT_SECONDS,
@@ -1222,6 +1286,8 @@ async def mobile_diagnose(
         device["accessibility_helper"] = accessibility_helper
     env_file = host.metadata.get("env_file")
     return {
+        "agent_client": os.environ.get("ARTEMIS_AGENT_CLIENT"),
+        "execution_mode": "executor" if executor_only else "autonomous",
         "verdict": verdict,
         "summary": _summary(results, verdict, credentials=credentials, device_probe=device_probe),
         "next_steps": _next_steps(
@@ -1236,6 +1302,7 @@ async def mobile_diagnose(
             tasks=extras["tasks"],
             device_probe=device_probe,
             accessibility_helper=accessibility_helper,
+            executor_only=executor_only,
         ),
         "checks": [_render_check(r) for r in sort_by_fix_order(results)],
         "host": _compact_host(host.metadata),

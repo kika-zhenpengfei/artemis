@@ -14,11 +14,28 @@
 
 """Shared FastMCP instance definition for the mobile automation MCP server."""
 
+from contextlib import asynccontextmanager
 import logging
+from typing import AsyncIterator
 
 from mcp.server.fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _server_lifespan(_server: FastMCP) -> AsyncIterator[dict]:
+    """Finalize any device leases before the long-lived MCP process exits."""
+    try:
+        yield {}
+    finally:
+        try:
+            from mcp_server.tools.device_execution import close_device_execution_sessions
+
+            await close_device_execution_sessions()
+        except Exception as exc:
+            logger.warning("Could not close device execution sessions: %s", exc, exc_info=True)
+
 
 try:
     from mcp.server.fastmcp.server import Settings as FastMCPSettings
@@ -32,8 +49,13 @@ except Exception as exc:
 # Define the shared FastMCP instance for external IDE and agent clients.
 mcp = FastMCP(
     "artemis",
+    lifespan=_server_lifespan,
     instructions=(
-        "ARTEMIS is an autonomous mobile AI agent and Android UI automation engine. "
+        "ARTEMIS is an Android UI automation engine. For external-agent-driven execution, "
+        "open a device lease with mobile_session, then use mobile_observe, mobile_act, and "
+        "mobile_verify in an observe-act-verify loop, and always close the session. "
+        "Use indexed elements before normalized coordinate fallback. "
+        "For legacy autonomous execution, "
         "Use mobile_run_task to launch autonomous UI workflows on connected Android devices or emulators, "
         "mobile_manage_task to check status or steer execution, "
         "mobile_get_device_state to inspect real-time device screen/hierarchy, "
