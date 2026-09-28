@@ -3202,6 +3202,112 @@ $stream-row-height: 25px;
     width: 380px;
     max-height: 520px;
 
+    .prepared-tests-heading {
+      font-size: 11px;
+      font-weight: 600;
+      color: #64748b;
+      margin-bottom: 6px;
+    }
+
+    .prepared-test-button {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      width: 100%;
+      padding: 8px;
+      margin-bottom: 5px;
+      border: 1px solid #e2e8f0;
+      border-radius: 7px;
+      background: #fff;
+      color: #334155;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .prepared-test-button.selected { border-color: #93c5fd; background: #eff6ff; }
+    .prepared-test-button small { flex: none; color: #64748b; }
+
+    .test-cases-section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #e2e8f0;
+      font-size: 12px;
+      color: #334155;
+    }
+
+    .test-cases-heading {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: baseline;
+    }
+
+    .test-cases-heading span,
+    .test-cases-summary {
+      color: #64748b;
+      font-size: 11px;
+    }
+
+    .test-case-card {
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      background: #fff;
+    }
+
+    .test-case-card summary {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 8px;
+      cursor: pointer;
+      list-style: none;
+    }
+
+    .test-case-card summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .test-case-status {
+      flex: none;
+      color: #64748b;
+      text-transform: capitalize;
+    }
+
+    .test-case-status.passed { color: #15803d; }
+    .test-case-status.failed { color: #dc2626; }
+    .test-case-status.inconclusive { color: #b45309; }
+
+    .test-case-body {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 0 8px 10px;
+      overflow-wrap: anywhere;
+      line-height: 1.45;
+    }
+
+    .test-case-body ul,
+    .test-case-body ol {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    .test-case-requirement,
+    .test-case-evidence {
+      padding: 6px;
+      border-radius: 5px;
+      background: #f8fafc;
+    }
+
+    .test-case-code {
+      font-family: 'Roboto Mono', Consolas, monospace;
+      font-size: 10px;
+      color: #475569;
+    }
+
     .notes-selector-container {
       display: flex;
       flex-direction: column;

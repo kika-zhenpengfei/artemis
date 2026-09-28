@@ -827,7 +827,19 @@ export class AgentStreamComponent implements AfterViewInit {
     this.isNotesDropdownOpen.update((v) => !v);
     if (this.isNotesDropdownOpen()) {
       this.isTaskDropdownOpen.set(false);
+      this.agentService.fetchPreparedTestWorkflows();
+      const sessionId = this.agentService.currentSessionId();
+      if (sessionId) {
+        this.agentService.fetchTestWorkflow(sessionId);
+      }
     }
+  }
+
+  public selectPreparedTestWorkflow(workflowId: string, event: Event): void {
+    event.stopPropagation();
+    this.agentService.selectSession(workflowId, true);
+    this.agentService.fetchTestWorkflow(workflowId);
+    this.agentService.fetchNotes(workflowId);
   }
 
   public openOutputterNote(event?: Event): void {

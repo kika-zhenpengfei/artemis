@@ -56,6 +56,14 @@ def _copy_release_resources(source_root: Path, resource_root: Path) -> None:
     config_target = resource_root / "config"
     config_target.mkdir(parents=True, exist_ok=True)
     shutil.copy2(config_source, config_target / "artemis.jsonc")
+    scenario_candidates = (
+        source_root / "config" / "scenario_prompts.json",
+        source_root / "artemis" / "resources" / "config" / "scenario_prompts.json",
+    )
+    scenario_source = next((path for path in scenario_candidates if path.is_file()), None)
+    if scenario_source is None:
+        raise RuntimeError("Cannot build Artemis: config/scenario_prompts.json is missing.")
+    shutil.copy2(scenario_source, config_target / "scenario_prompts.json")
 
     showcase_target = resource_root / "showcase_ui"
     if showcase_target.exists():

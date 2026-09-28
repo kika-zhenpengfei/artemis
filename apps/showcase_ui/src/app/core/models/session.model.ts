@@ -79,7 +79,45 @@ export interface SessionUsage {
   run_tuning?: SessionRunTuning | null;
 }
 
+export interface TestWorkflow {
+  workflow_id: string;
+  goal: string;
+  profile: 'flash' | 'pro' | null;
+  phase: 'context' | 'planned' | 'running' | 'finished';
+  counts: Record<'passed' | 'failed' | 'inconclusive' | 'not_run', number>;
+  requirements: {
+    id: string;
+    description: string;
+    code_refs: { path: string; line: number; reason: string }[];
+  }[];
+  cases: {
+    id: string;
+    title: string;
+    requirement_ids: string[];
+    preconditions: string[];
+    steps: string[];
+    expected_result: string;
+    checkpoints: { id: string; assertion: string }[];
+    status: 'passed' | 'failed' | 'inconclusive' | 'not_run';
+    actions: { action: string; status: string; step_id: string }[];
+    verifications: {
+      checkpoint_id: string | null;
+      status: string;
+      assertion: string;
+      evidence: string;
+      step_id: string;
+    }[];
+  }[];
+}
+
+export interface PreparedTestWorkflow {
+  workflow_id: string;
+  goal: string;
+  profile: 'flash' | 'pro';
+  case_count: number;
+  created_at: number;
+}
+
 export type AgentStatus = 'idle' | 'running' | 'completed' | 'offline' | string;
 
 export type TaskStatus = 'running' | 'paused' | 'completed' | 'pending' | 'failed' | 'cancelled';
-

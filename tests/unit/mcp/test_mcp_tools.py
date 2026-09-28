@@ -34,6 +34,9 @@ from mcp_server.tools import (
     mobile_observe,
     mobile_run_task,
     mobile_session,
+    mobile_test_cases,
+    mobile_test_context,
+    mobile_test_report,
     mobile_verify,
 )
 from artemis.runtime import trace_store
@@ -53,6 +56,7 @@ def test_tool_signatures():
     assert "operation" in sig_session.parameters
     assert "device_serial" in sig_session.parameters
     assert "idle_timeout_seconds" in sig_session.parameters
+    assert "workflow_id" in sig_session.parameters
 
     sig_observe = inspect.signature(mobile_observe)
     assert "session_id" in sig_observe.parameters
@@ -62,10 +66,17 @@ def test_tool_signatures():
     assert "action" in sig_act.parameters
     assert "arguments" in sig_act.parameters
     assert "observation_id" in sig_act.parameters
+    assert "case_id" in sig_act.parameters
 
     sig_verify = inspect.signature(mobile_verify)
     assert "assertion" in sig_verify.parameters
     assert "evidence" in sig_verify.parameters
+    assert "case_id" in sig_verify.parameters
+    assert "checkpoint_id" in sig_verify.parameters
+
+    assert "repository_root" in inspect.signature(mobile_test_context).parameters
+    assert "profile" in inspect.signature(mobile_test_cases).parameters
+    assert "workflow_id" in inspect.signature(mobile_test_report).parameters
 
     # mobile_run_task signature check
     sig_run = inspect.signature(mobile_run_task)

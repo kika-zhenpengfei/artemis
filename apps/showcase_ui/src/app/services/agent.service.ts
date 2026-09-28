@@ -18,7 +18,7 @@ import { Injectable, signal, inject, computed, DestroyRef, NgZone } from '@angul
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 
-import { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, SessionUsage } from '../core/models/session.model';
+import { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, SessionUsage, TestWorkflow, PreparedTestWorkflow } from '../core/models/session.model';
 import { ProTuningDefaults, ProTuningOptions } from '../core/models/pro-tuning.model';
 import { StepItemData, StepReplayFrame, LLMStreamResetEventData, StreamResetNotice, DEFAULT_STREAM_RESET_MESSAGE, PersistedCheckerStream, StreamSegment } from '../core/models/stream.model';
 import { extractStepReplayFrames } from '../utils/action-formatter.util';
@@ -199,6 +199,8 @@ export class AgentService {
 
   public currentSessionId = signal<string | null>(null);
   public sessionLogs = signal<any[]>([]); // Dynamic array of all raw events received
+  public currentTestWorkflow = signal<TestWorkflow | null>(null);
+  public preparedTestWorkflows = signal<PreparedTestWorkflow[]>([]);
   public isSessionContentLoading = signal<boolean>(false);
   public agentStatus = signal<string>('idle'); // Status of the agent runner process
   public runningSessionId = signal<string | null>(null);
@@ -724,6 +726,7 @@ export class AgentService {
       this.currentSessionId.set(null);
       this.sessionLogs.set([]);
       this.currentNotes.set({});
+      this.currentTestWorkflow.set(null);
       return;
     }
 
@@ -738,10 +741,13 @@ export class AgentService {
     this.isSessionContentLoading.set(true);
     this.currentSessionId.set(sessionId);
     this.sessionLogs.set([]); // Reset logs for new session selection
+    this.currentNotes.set({});
+    this.currentTestWorkflow.set(null);
     this.activePauseCardKey = null;
     this.isPaused.set(false);
     this.pausedError.set(null);
     this.fetchNotes(sessionId);
+    this.fetchTestWorkflow(sessionId);
     this.fetchChecks(sessionId);
 
     // If video window is currently open, dynamically sync/refresh video for new session
@@ -887,6 +893,7 @@ export class AgentService {
             if (endedId) {
               this.fetchNotes(endedId);
               if (String(endedId) === String(this.currentSessionId() || '')) {
+                this.fetchTestWorkflow(endedId);
                 // The exit final review / run outcome may have landed while the
                 // stream was reconnecting: reconcile from the persisted ledger.
                 this.fetchChecks(endedId);
@@ -1088,6 +1095,13 @@ export class AgentService {
               if (curSessionId) {
                 this.fetchNotes(curSessionId);
               }
+            }
+          }
+          if (eventType === 'verification_recorded' && parsedData?.session_id) {
+            const verifiedSessionId = String(parsedData.session_id);
+            if (this.currentSessionId() === verifiedSessionId) {
+              this.fetchTestWorkflow(verifiedSessionId);
+              this.fetchNotes(verifiedSessionId);
             }
           }
         } catch (e) {
@@ -1767,6 +1781,34 @@ export class AgentService {
       },
       error: (err) => {
         console.error(`Failed to fetch notes for session ${sessionId}:`, err);
+      }
+    });
+  }
+
+  public fetchTestWorkflow(sessionId: string): void {
+    this.http.get<TestWorkflow>(`/api/sessions/${encodeURIComponent(sessionId)}/test_workflow`).subscribe({
+      next: (workflow) => {
+        if (this.currentSessionId() === sessionId) {
+          this.currentTestWorkflow.set(workflow);
+        }
+      },
+      error: (err) => {
+        if (err.status !== 404) {
+          console.error(`Failed to fetch test workflow for session ${sessionId}:`, err);
+        }
+        if (this.currentSessionId() === sessionId) {
+          this.currentTestWorkflow.set(null);
+        }
+      }
+    });
+  }
+
+  public fetchPreparedTestWorkflows(): void {
+    this.http.get<PreparedTestWorkflow[]>('/api/test_workflows/prepared').subscribe({
+      next: (workflows) => this.preparedTestWorkflows.set(workflows),
+      error: (err) => {
+        console.error('Failed to fetch prepared test workflows:', err);
+        this.preparedTestWorkflows.set([]);
       }
     });
   }

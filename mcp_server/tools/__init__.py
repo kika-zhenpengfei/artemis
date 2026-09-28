@@ -25,6 +25,11 @@ from mcp_server.tools.diagnose import mobile_diagnose
 from mcp_server.tools.inspect_trace import mobile_inspect_trace
 from mcp_server.tools.task_manager import mobile_manage_task
 from mcp_server.tools.task_runner import mobile_run_task
+from mcp_server.tools.test_workflow import (
+    mobile_test_cases,
+    mobile_test_context,
+    mobile_test_report,
+)
 
 __all__ = [
     "mobile_run_task",
@@ -36,4 +41,7 @@ __all__ = [
     "mobile_observe",
     "mobile_act",
     "mobile_verify",
+    "mobile_test_context",
+    "mobile_test_cases",
+    "mobile_test_report",
 ]

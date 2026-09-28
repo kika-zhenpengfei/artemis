@@ -39,11 +39,13 @@ are dispatched through the node so existing test patches keep working.
 import asyncio
 import base64
 from dataclasses import dataclass
+import hashlib
 import time
 import uuid
 from uuid import UUID
 
 from artemis.agents.validator.categories import ValidationErrorCategory
+from artemis.agents.scenario_rules import NoProgressGuard
 from artemis.agents.validator.incidents import (
     KIND_EXEC_ERROR,
     KIND_SAFETY_NET,
@@ -56,6 +58,10 @@ from artemis.utils.logger import get_logger
 from artemis.utils.task_tree import format_action_clean
 
 logger = get_logger(__name__)
+
+_NO_PROGRESS_ACTIONS = frozenset(
+    {"tap", "long_press_on", "focus_and_input_text", "swipe"}
+)
 
 #: ``attempts`` marker for actions a burst never reached.
 BURST_SKIPPED_MARKER = "Skipped (burst aborted)"
@@ -180,6 +186,18 @@ async def _process_action(
     action_item = dict(action_item)  # Make a copy to avoid mutating original state actions
     outcome = _ActionOutcome(action_item=action_item)
     attempts_log = []
+
+    if not burst and action_name in _NO_PROGRESS_ACTIONS and pre_screenshot_b64:
+        guard = getattr(node, "_no_progress_guard", None)
+        if not isinstance(guard, NoProgressGuard):
+            guard = NoProgressGuard()
+            node._no_progress_guard = guard
+        fingerprint = hashlib.sha256(pre_screenshot_b64.encode("ascii")).hexdigest()
+        reason = guard.check(action_name, action_item, fingerprint)
+        if reason:
+            outcome.error_msg = reason
+            outcome.action_item["attempts"] = [reason]
+            return outcome
 
     validation_passed = True
     if not burst:

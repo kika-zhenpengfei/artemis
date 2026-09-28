@@ -55,6 +55,7 @@ from langchain_core.messages import (
 
 from artemis.agents.flash.summarizer import VisualStepSummarizer, build_focus_context
 from artemis.agents.operator.prompts import REASONING_REMINDER, UserGuidance, render_user_guidance
+from artemis.agents.scenario_rules import scenario_guidance
 from artemis.agents.validator.tool_declarations import (
     ASK_EXPLORER_TOOL,
     CLICK_SEQUENCE_TOOL,
@@ -375,6 +376,10 @@ class FlashRunner:
         if xml_list:
             blocks.append({"type": "text", "text": f"{PRO_UI_LIST_MARKER}\n{xml_list}"})
         ephemeral: list[int] = []
+        guidance = scenario_guidance(self.goal, xml_list or "")
+        if guidance["prompt"]:
+            ephemeral.append(len(blocks))
+            blocks.append({"type": "text", "text": guidance["prompt"]})
         # (text, ephemeral) in tail order.
         per_turn: list[tuple[str, bool]] = [(text, True) for text in (notices or [])]
         if injected:

@@ -39,6 +39,7 @@ logger = get_logger(__name__)
 
 
 from artemis.agents.prompt_assembly import render_tool_enum, resolve_available
+from artemis.agents.scenario_rules import scenario_guidance
 from artemis.mcp.action_specs import OPERATOR_SHELL_ORDER
 
 
@@ -388,6 +389,9 @@ class ObservationPromptComponent(PromptComponent):
             }
         )
         builder.add_human_content(f"--- Visible UI Elements ---\n{minimal_list}")
+        guidance = scenario_guidance(state.initial_goal, minimal_list or "")
+        if guidance["prompt"]:
+            builder.add_human_content(guidance["prompt"], ephemeral=True)
 
 
 class PlanRecitationPromptComponent(PromptComponent):

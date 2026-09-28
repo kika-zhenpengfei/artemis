@@ -38,6 +38,7 @@ from typing import Any
 
 from artemis.core.tool_failure import ToolFailure, is_tool_failure
 from artemis.context import ArtemisContext
+from artemis.agents.scenario_rules import NoProgressGuard, screen_fingerprint
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.data_engine.trace import TraceSpan
 from artemis.mcp.action_manifest import OPTIONAL_ACTIONS, REQUIRED_ACTIONS
@@ -76,6 +77,9 @@ AGENT_TOOL_NAMES: frozenset[str] = (
 
 #: Actions whose ``target`` is a single point: an element index or an [x, y] pair.
 _POINT_TARGET_ACTIONS: frozenset[str] = frozenset({"click", "long_press", "input_text"})
+_NO_PROGRESS_ACTIONS: frozenset[str] = frozenset(
+    {"click", "click_sequence", "long_press", "input_text", "swipe"}
+)
 
 
 class _ArgError(ValueError):
@@ -100,6 +104,20 @@ class McpActionExecutor:
         # never sees or chooses the tier.
         self.agent_name = agent_name
         self._session: ActionSession | None = None
+        self._no_progress_guard = NoProgressGuard()
+
+    @staticmethod
+    def _screen_fingerprint(state: Any) -> str | None:
+        hierarchy = getattr(state, "latest_ui_hierarchy", None)
+        screen_text = hierarchy if isinstance(hierarchy, str) else None
+        image_path = getattr(state, "latest_screenshot", None)
+        image_bytes = None
+        if isinstance(image_path, (str, Path)):
+            try:
+                image_bytes = Path(image_path).read_bytes()
+            except OSError:
+                pass
+        return screen_fingerprint(screen_text=screen_text, screenshot_bytes=image_bytes)
 
     @property
     def action_tool_names(self) -> frozenset[str]:
@@ -184,8 +202,20 @@ class McpActionExecutor:
                     # not a point).
                     target_coordinates = wire_args.get("target")
                 extension = raw_name not in (REQUIRED_ACTIONS | OPTIONAL_ACTIONS)
+                blocked_reason = (
+                    self._no_progress_guard.check(
+                        raw_name, wire_args, self._screen_fingerprint(state)
+                    )
+                    if raw_name in _NO_PROGRESS_ACTIONS
+                    else None
+                )
 
-                if extension:
+                if blocked_reason:
+                    res = ActionResult.failure(
+                        raw_name, blocked_reason, code=ActionCode.NO_PROGRESS
+                    )
+                    message = blocked_reason
+                elif extension:
                     raw_result = await session.call_raw(wire_name, wire_args)
                     message = next(
                         (b.text for b in raw_result.content if getattr(b, "type", "") == "text"),

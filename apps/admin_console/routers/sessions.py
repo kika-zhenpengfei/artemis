@@ -19,6 +19,7 @@ from uuid import UUID
 from fastapi import APIRouter, HTTPException
 
 from artemis.config import DB_PATH, TRACES_PATH
+from artemis.device_execution.test_workflow import TestWorkflowStore
 from artemis.runtime import trace_store
 
 try:
@@ -36,6 +37,12 @@ except ImportError:
 
 
 router = APIRouter(tags=["sessions"])
+
+
+@router.get("/api/test_workflows/prepared")
+async def list_prepared_test_workflows():
+    """Plans are visible before they acquire a device session."""
+    return await asyncio.to_thread(TestWorkflowStore().list_prepared)
 
 
 @router.get("/api/sessions")
@@ -174,6 +181,15 @@ async def get_session_details(session_id: str):
     if not row:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
     return dict(row)
+
+
+@router.get("/api/sessions/{session_id}/test_workflow")
+async def get_session_test_workflow(session_id: str):
+    """Return source-linked cases and their current device verdicts."""
+    try:
+        return await asyncio.to_thread(TestWorkflowStore().snapshot, session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/api/sessions/{session_id}/usage")

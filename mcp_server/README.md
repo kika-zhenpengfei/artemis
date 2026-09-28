@@ -22,6 +22,7 @@ mcp_server/
 │   └── composite.py      # Multi-channel notification dispatcher
 ├── tools/                # Modular standard MCP tools
 │   ├── device_execution.py # mobile_session / observe / act / verify
+│   ├── test_workflow.py # source links / core cases / report
 │   ├── task_runner.py    # mobile_run_task
 │   ├── task_manager.py   # mobile_manage_task
 │   ├── device_state.py   # mobile_get_device_state
@@ -76,15 +77,29 @@ When you run `uv run artemis mcp --install all` (or target a specific IDE like `
 
 ## 🛠️ MCP Tools Overview
 
-* **`mobile_session`**: Opens, inspects, or closes a device lease controlled by the current external Agent session. On the first `open`, executor mode lazily starts the WebUI when `ARTEMIS_AUTO_START_UI=true` (default for generated Codex and ZCode config), reuses an existing ARTEMIS server, and reports port conflicts without blocking device execution. The device lock is held for the session lifetime and the resulting session appears in the WebUI with its originating Agent client.
+* **`mobile_test_context`**: Persists requirement-to-source links checked against actual repository files and lines before a device lease is acquired.
+* **`mobile_test_cases`**: Persists core cases tied to those requirements. Selects an external-agent `flash` or `pro` workflow; Pro cases declare checkpoints. The generated plan appears in the WebUI's Plans & Cases panel.
+* **`mobile_session`**: Opens, inspects, or closes a device lease controlled by the current external Agent session. Pass the prepared `workflow_id` to run its cases. On the first `open`, executor mode lazily starts the WebUI when `ARTEMIS_AUTO_START_UI=true` (default for generated Codex and ZCode config), reuses an existing ARTEMIS server, and reports port conflicts without blocking device execution. The device lock is held for the session lifetime and the resulting session appears in the WebUI with its originating Agent client.
 * **`mobile_observe`**: Captures the current screenshot and indexed UI elements, returns a fresh `observation_id`, and persists an observation step.
-* **`mobile_act`**: Executes one action through the shared ARTEMIS actuator, then observes and persists the result. Screen actions require the latest `observation_id`; use indexed elements first and normalized coordinates as fallback.
-* **`mobile_verify`**: Records an evidence-backed `passed`, `failed`, or `inconclusive` verification in the same WebUI timeline.
+* **`mobile_act`**: Executes one action through the shared ARTEMIS actuator, then observes and persists the result. Screen actions require the latest `observation_id`; use indexed elements first and normalized coordinates as fallback. Planned runs also require `case_id` and link actions to the case.
+* **`mobile_verify`**: Records an evidence-backed `passed`, `failed`, or `inconclusive` verification in the same WebUI timeline. Planned runs require `case_id` and the latest `observation_id`; Pro checkpoints use `checkpoint_id`.
+* **`mobile_test_report`**: Returns per-case results and writes a Markdown report into the session notes. Closing a planned session finalizes the report automatically.
 * **`mobile_run_task`**: Asynchronously launches an autonomous mobile automation task (`Flash` or `Pro` model) with optional `device_serial` targeting. Pro runs can be tuned with `verification_level` (`off` | `final` | `checkpoints` | `strict` — how much the Checker audits) and `explorer_mode` (`flash` | `pro` | `ultra` — the Operator's perception depth).
 * **`mobile_manage_task`**: Manages task lifecycle (`status`, `stop`, `inject_instruction`), returning task state and assigned `device_serial`. Pass `release_loop=True` with `inject_instruction` to gracefully end a `[Loop:continuous]` monitoring task — this explicit signal (not "please stop" wording) is what unlocks the loop milestone's completion.
 * **`mobile_get_device_state`**: Real-time observer (`screenshot` or OCR+XML `hierarchy`) with optional `device_serial`.
 * **`mobile_inspect_trace`**: Granular trace inspection, visual action overlays, agent reasoning, and `device_serial` tracking.
 * **`mobile_diagnose`**: Environment doctor for the IDE. Reuses the readiness probes behind `artemis doctor` and the web console's device wizard (Python runtime, config, LLM credentials, ADB / devices / RSA keys / emulators, video toolchain) plus an MCP-host probe (server interpreter vs project `.venv`, detected MCP client, `.env` location, traces directory, daemon port collisions). Returns a `verdict` (`ready` | `degraded` | `blocked`), an ordered `next_steps` fix list the AI agent can act on (`Run:` one-command lines vs `Guidance:` for the user), scrubbed per-check details, `tasks` holding or waiting for devices, log paths, and the most recent failed task with its `recent_errors`. Optional deep checks: `verify_credentials=true` (live API-key validation, ~12s, result in `credentials`), `probe_device=true` (end-to-end screenshot + UIAutomator hierarchy, ~20s, result in `device_probe`), `launch_avd="<name>"` (boots an installed AVD in the background; re-run after ~60s). `attempt_fix=true` applies the safe self-heals (regenerate corrupted ADB keys, restart the ADB server, clear stale device locks / queue tickets left by crashed runners).
+
+Recurring scene guidance is configured in `config/scenario_prompts.json` (override with `ARTEMIS_SCENARIO_PROMPTS_FILE`). Each scene has a unique Chinese `title`, a natural-language `when` condition, and Chinese `instructions`. Flash, Pro, and the external executor receive the candidate rules in their existing prompts or observation responses; the current agent decides which rule applies from the goal and observed screen, without an extra model call. Reports list supplied candidate rules, not automatically inferred matches. An unchanged screen and identical action are allowed twice; a third attempt is rejected with a `NO_PROGRESS` result. Keyboard suggestion rules require real taps on the target IME, since text injection may bypass its recommendation path.
+
+### Source-linked executor test workflow
+
+1. The development agent inspects requirements and repository code, then calls `mobile_test_context(goal, repository_root, requirements)` with requirement IDs and real `{path, line, reason}` code references. This creates a workflow without locking a phone.
+2. It derives core cases and calls `mobile_test_cases(workflow_id, cases, profile="flash" | "pro")`. Each case includes requirement IDs, preconditions, steps, and an expected result. Pro cases also declare checkpoints. The plan is saved to `traces/<workflow_id>/notes/test_plan.md`.
+3. It opens `mobile_session(operation="open", workflow_id=workflow_id)`, observes the screen, and executes each case with `mobile_act(..., case_id=...)`. It records the final result with `mobile_verify(..., case_id=..., assertion=<expected_result>, observation_id=...)`; Pro also verifies each checkpoint using `checkpoint_id`.
+4. It closes the session and calls `mobile_test_report(workflow_id)`. A case only passes after its final expected result and all Pro checkpoints pass. The report is saved to `traces/<workflow_id>/notes/test_report.md`, and incomplete or failed cases make an otherwise completed session fail.
+
+The WebUI's **Plans & Cases** panel lists prepared plans before device execution. Once a plan is selected, it displays its cases, requirement/code links, action traces, verification evidence, and live results. Autonomous `mobile_run_task` Flash/Pro runs retain their existing behavior.
 
 ### 📱 Device Selection & Multi-Device Execution
 ARTEMIS supports parallel execution across multiple connected Android devices and emulators:

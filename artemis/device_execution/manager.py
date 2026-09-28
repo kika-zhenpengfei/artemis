@@ -37,7 +37,9 @@ from artemis.config import settings
 from artemis.context import ArtemisContext, DeviceContext, DevicePlatform
 from artemis.controllers.unified_controller import UnifiedMobileController
 from artemis.data_engine.engine import DataEngine
+from artemis.device_execution.test_workflow import TestWorkflowStore
 from artemis.mcp.action_executor import McpActionExecutor
+from artemis.agents.scenario_rules import scenario_guidance
 from artemis.mcp.action_session import get_action_session
 from artemis.mcp.action_types import ActionCode
 from artemis.mcp.actuators.base import Actuator
@@ -111,6 +113,7 @@ class DeviceExecution(Protocol):
         session_id: str | None = None,
         lock_timeout_seconds: float = 30.0,
         idle_timeout_seconds: float = 900.0,
+        workflow_id: str | None = None,
     ) -> dict[str, Any]: ...
 
     async def status(self, session_id: str | None = None) -> dict[str, Any]: ...
@@ -129,6 +132,7 @@ class DeviceExecution(Protocol):
         action: str,
         arguments: dict[str, Any] | None = None,
         observation_id: str | None = None,
+        case_id: str | None = None,
     ) -> tuple[dict[str, Any], bytes | None]: ...
 
     async def verify(
@@ -139,6 +143,8 @@ class DeviceExecution(Protocol):
         status: str,
         evidence: str,
         observation_id: str | None = None,
+        case_id: str | None = None,
+        checkpoint_id: str | None = None,
     ) -> dict[str, Any]: ...
 
     async def close(
@@ -261,6 +267,7 @@ class _Session:
     runtime: DeviceRuntime
     executor: McpActionExecutor
     agent_client: str
+    workflow_id: str | None = None
     state: _ExecutionState = field(default_factory=_ExecutionState)
     last_observation_id: str | None = None
     last_screenshot_bytes: bytes | None = None
@@ -284,7 +291,9 @@ class DeviceExecutionManager:
         self._agent_client = _normalize_agent_client(
             agent_client or os.environ.get("ARTEMIS_AGENT_CLIENT")
         )
+        self._test_workflows = TestWorkflowStore()
         self._sessions: dict[str, _Session] = {}
+        self._opening_sessions: set[str] = set()
         self._registry_lock = asyncio.Lock()
 
     async def open(
@@ -295,22 +304,37 @@ class DeviceExecutionManager:
         session_id: str | None = None,
         lock_timeout_seconds: float = 30.0,
         idle_timeout_seconds: float = 900.0,
+        workflow_id: str | None = None,
     ) -> dict[str, Any]:
-        clean_goal = goal.strip()
+        planned_workflow = self._test_workflows.planned(workflow_id) if workflow_id else None
+        if planned_workflow and goal.strip() and goal.strip() != planned_workflow["goal"]:
+            raise ValueError("goal must match the planned test workflow")
+        clean_goal = planned_workflow["goal"] if planned_workflow else goal.strip()
         if not clean_goal:
             raise ValueError("goal must not be empty")
-        resolved_session_id = session_id or str(uuid.uuid4())
+        if workflow_id and session_id and session_id != workflow_id:
+            raise ValueError("session_id must match workflow_id")
+        resolved_session_id = workflow_id or session_id or str(uuid.uuid4())
         async with self._registry_lock:
-            if resolved_session_id in self._sessions:
+            if (
+                resolved_session_id in self._sessions
+                or resolved_session_id in self._opening_sessions
+            ):
                 raise ValueError(f"Device session '{resolved_session_id}' is already open.")
+            self._opening_sessions.add(resolved_session_id)
 
-        runtime = await self._runtime_adapter.open(
-            session_id=resolved_session_id,
-            goal=clean_goal,
-            device_serial=device_serial,
-            agent_client=self._agent_client,
-            lock_timeout_seconds=max(0.1, lock_timeout_seconds),
-        )
+        try:
+            runtime = await self._runtime_adapter.open(
+                session_id=resolved_session_id,
+                goal=clean_goal,
+                device_serial=device_serial,
+                agent_client=self._agent_client,
+                lock_timeout_seconds=max(0.1, lock_timeout_seconds),
+            )
+        except Exception:
+            async with self._registry_lock:
+                self._opening_sessions.discard(resolved_session_id)
+            raise
         data_engine: DataEngine | None = None
         try:
             data_engine = self._data_engine_factory(runtime.ctx)
@@ -342,10 +366,18 @@ class DeviceExecutionManager:
                 runtime=runtime,
                 executor=executor,
                 agent_client=self._agent_client,
+                workflow_id=workflow_id,
                 idle_timeout_seconds=max(60.0, idle_timeout_seconds),
             )
+            if workflow_id:
+                self._test_workflows.bind(
+                    workflow_id,
+                    session_id=resolved_session_id,
+                    device_serial=runtime.device_serial,
+                )
             async with self._registry_lock:
                 self._sessions[resolved_session_id] = session
+                self._opening_sessions.discard(resolved_session_id)
             session.watchdog = asyncio.create_task(
                 self._watch_idle(resolved_session_id),
                 name=f"artemis-device-session-{resolved_session_id}",
@@ -355,6 +387,9 @@ class DeviceExecutionManager:
                 data_engine.end_session(status="failed")
                 await data_engine.shutdown()
             await self._runtime_adapter.close(runtime)
+            async with self._registry_lock:
+                self._sessions.pop(resolved_session_id, None)
+                self._opening_sessions.discard(resolved_session_id)
             raise
 
         return {
@@ -363,6 +398,8 @@ class DeviceExecutionManager:
             "goal": clean_goal,
             "device_serial": runtime.device_serial,
             "agent_client": self._agent_client,
+            "workflow_id": workflow_id,
+            "profile": planned_workflow["profile"] if planned_workflow else None,
             "coordinate_space": "normalized 0-1000",
             "capabilities": sorted(executor.action_tool_names),
             "next": "Call mobile_observe before any screen-targeted action.",
@@ -411,6 +448,11 @@ class DeviceExecutionManager:
             session.last_observation_id = observation_id
             session.last_screenshot_bytes = image_bytes
             foreground_app = await self._foreground_app(session)
+            guidance = scenario_guidance(session.goal, observed.elements_text)
+            if session.workflow_id:
+                self._test_workflows.record_scenario_rules(
+                    session.workflow_id, guidance["rule_ids"]
+                )
 
             engine.record_trace(
                 type="tool",
@@ -433,6 +475,7 @@ class DeviceExecutionManager:
                     "executor": session.agent_client,
                     "event_kind": "observation",
                     "observation_id": observation_id,
+                    "scenario_rule_ids": guidance["rule_ids"],
                 },
             )
             return self._observation_payload(session, observed, observation_id), image_bytes
@@ -444,12 +487,17 @@ class DeviceExecutionManager:
         action: str,
         arguments: dict[str, Any] | None = None,
         observation_id: str | None = None,
+        case_id: str | None = None,
     ) -> tuple[dict[str, Any], bytes | None]:
         session = await self._require_session(session_id)
         clean_action = action.strip().split(":")[-1]
         args = dict(arguments or {})
         async with session.operation_lock:
             session.last_activity = time.monotonic()
+            if session.workflow_id:
+                self._test_workflows.validate_case(session.workflow_id, case_id)
+            elif case_id:
+                raise ValueError("case_id requires a session opened with workflow_id")
             if clean_action not in session.executor.action_tool_names:
                 return self._action_error(
                     session,
@@ -495,10 +543,16 @@ class DeviceExecutionManager:
             if new_observation_id:
                 session.last_observation_id = new_observation_id
             foreground_app = await self._foreground_app(session)
+            guidance = scenario_guidance(session.goal, session.state.latest_ui_hierarchy or "")
+            if session.workflow_id:
+                self._test_workflows.record_scenario_rules(
+                    session.workflow_id, guidance["rule_ids"]
+                )
             action_record = {
                 "action": clean_action,
                 "args": args,
                 "status": result.status,
+                "case_id": case_id,
                 **(result.metadata.get("target_semantics") or {}),
             }
             target_coordinates = result.metadata.get("target_coordinates")
@@ -520,12 +574,23 @@ class DeviceExecutionManager:
                     "executor": session.agent_client,
                     "event_kind": "action",
                     "observation_id": new_observation_id,
+                    "case_id": case_id,
+                    "scenario_rule_ids": guidance["rule_ids"],
                 },
             )
+            if session.workflow_id and case_id:
+                self._test_workflows.record_action(
+                    session.workflow_id,
+                    case_id=case_id,
+                    action=clean_action,
+                    status=result.status,
+                    step_id=str(step_id),
+                )
             payload = {
                 "session_id": session_id,
                 "step_id": str(step_id),
                 "action": clean_action,
+                "case_id": case_id,
                 "ok": result.status == "success",
                 "code": result.metadata.get("code"),
                 "message": result.text_summary,
@@ -541,6 +606,8 @@ class DeviceExecutionManager:
         status: str,
         evidence: str,
         observation_id: str | None = None,
+        case_id: str | None = None,
+        checkpoint_id: str | None = None,
     ) -> dict[str, Any]:
         session = await self._require_session(session_id)
         normalized_status = status.strip().lower()
@@ -552,10 +619,23 @@ class DeviceExecutionManager:
             raise ValueError("assertion must not be empty")
         if not clean_evidence:
             raise ValueError("evidence must not be empty")
-        if observation_id and observation_id != session.last_observation_id:
-            raise ValueError("observation_id is stale; observe the screen again before verifying")
         async with session.operation_lock:
             session.last_activity = time.monotonic()
+            if observation_id and observation_id != session.last_observation_id:
+                raise ValueError(
+                    "observation_id is stale; observe the screen again before verifying"
+                )
+            if session.workflow_id:
+                if not observation_id:
+                    raise ValueError("observation_id is required for planned case verification")
+                self._test_workflows.validate_verification(
+                    session.workflow_id,
+                    case_id=case_id,
+                    checkpoint_id=checkpoint_id,
+                    assertion=clean_assertion,
+                )
+            elif case_id or checkpoint_id:
+                raise ValueError("case_id requires a session opened with workflow_id")
             engine = session.runtime.ctx.data_engine
             step_id = engine.allocate_step_id()
             payload = {
@@ -563,6 +643,8 @@ class DeviceExecutionManager:
                 "status": normalized_status,
                 "evidence": clean_evidence,
                 "observation_id": session.last_observation_id,
+                "case_id": case_id,
+                "checkpoint_id": checkpoint_id,
             }
             engine.record_trace(
                 type="tool",
@@ -581,13 +663,29 @@ class DeviceExecutionManager:
                     "executor": session.agent_client,
                     "event_kind": "verification",
                     "observation_id": session.last_observation_id,
+                    "case_id": case_id,
+                    "checkpoint_id": checkpoint_id,
                 },
+            )
+            case_result = (
+                self._test_workflows.record_verification(
+                    session.workflow_id,
+                    case_id=case_id,
+                    checkpoint_id=checkpoint_id,
+                    status=normalized_status,
+                    assertion=clean_assertion,
+                    evidence=clean_evidence,
+                    step_id=str(step_id),
+                    observation_id=session.last_observation_id,
+                )
+                if session.workflow_id and case_id
+                else {}
             )
             engine._publish(
                 "verification_recorded",
                 {"session_id": session_id, "step_id": str(step_id), **payload},
             )
-            return {"session_id": session_id, "step_id": str(step_id), **payload}
+            return {"session_id": session_id, "step_id": str(step_id), **payload, **case_result}
 
     async def close(
         self,
@@ -613,6 +711,11 @@ class DeviceExecutionManager:
         if session.watchdog is not None and session.watchdog is not current_task:
             session.watchdog.cancel()
         async with session.operation_lock:
+            if session.workflow_id and normalized_status == "completed":
+                counts = self._test_workflows.snapshot(session.workflow_id)["counts"]
+                if counts["failed"] or counts["inconclusive"] or counts["not_run"]:
+                    normalized_status = "failed"
+            test_report = None
             try:
                 try:
                     if summary:
@@ -630,6 +733,10 @@ class DeviceExecutionManager:
                         result=summary if normalized_status == "completed" else None,
                         device_serial=session.runtime.device_serial,
                     )
+                    if session.workflow_id:
+                        test_report = self._test_workflows.finish(
+                            session.workflow_id, session_status=normalized_status
+                        )
                 finally:
                     await session.runtime.ctx.__aexit__(None, None, None)
             finally:
@@ -639,6 +746,7 @@ class DeviceExecutionManager:
             "status": normalized_status,
             "device_serial": session.runtime.device_serial,
             "summary": summary,
+            "test_report": test_report,
         }
 
     async def close_all(self, status: str = "cancelled") -> None:
@@ -705,12 +813,14 @@ class DeviceExecutionManager:
             "goal": session.goal,
             "device_serial": session.runtime.device_serial,
             "agent_client": session.agent_client,
+            "workflow_id": session.workflow_id,
             "last_observation_id": session.last_observation_id,
             "idle_seconds": round(time.monotonic() - session.last_activity, 1),
         }
 
     @staticmethod
     def _observation_payload(session: _Session, observed: Any, observation_id: str | None) -> dict:
+        guidance = scenario_guidance(session.goal, observed.elements_text)
         return {
             "session_id": session.session_id,
             "observation_id": observation_id,
@@ -723,12 +833,14 @@ class DeviceExecutionManager:
             "hierarchy_ok": observed.hierarchy_ok,
             "elements_text": observed.elements_text,
             "element_count": len(observed.elements),
+            "scenario_guidance": guidance,
         }
 
     @staticmethod
     def _state_observation_payload(session: _Session, observation_id: str | None) -> dict | None:
         if observation_id is None:
             return None
+        guidance = scenario_guidance(session.goal, session.state.latest_ui_hierarchy or "")
         return {
             "observation_id": observation_id,
             "image_name": Path(session.state.latest_screenshot).stem
@@ -738,6 +850,7 @@ class DeviceExecutionManager:
             "element_count": len(session.state.indexed_elements),
             "width": session.runtime.ctx.device.device_width,
             "height": session.runtime.ctx.device.device_height,
+            "scenario_guidance": guidance,
         }
 
     @staticmethod

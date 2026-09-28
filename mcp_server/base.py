@@ -54,6 +54,8 @@ mcp = FastMCP(
         "ARTEMIS is an Android UI automation engine. For external-agent-driven execution, "
         "open a device lease with mobile_session, then use mobile_observe, mobile_act, and "
         "mobile_verify in an observe-act-verify loop, and always close the session. "
+        "For source-linked tests, use mobile_test_context and mobile_test_cases before "
+        "mobile_session, pass case_id during execution, and read mobile_test_report after closing. "
         "Use indexed elements before normalized coordinate fallback. "
         "For legacy autonomous execution, "
         "Use mobile_run_task to launch autonomous UI workflows on connected Android devices or emulators, "

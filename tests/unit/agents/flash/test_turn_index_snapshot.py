@@ -129,6 +129,7 @@ def _executor():
     ctx.device.device_height = 2400
     actuator = Mock()
     actuator.controller = Mock()
+    actuator.extensions.return_value = []
     return McpActionExecutor(ctx, actuator=actuator)
 
 
@@ -156,6 +157,24 @@ def test_resolve_index_uses_the_given_list_and_falls_back_to_the_state():
         "input_text", {"target": 2, "text": "hi"}, state, index_elements=ORIGINAL
     )
     assert wire["target"] == [500, 250] and recorded["target_text"] == "Search"
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_third_identical_tap_without_screen_progress():
+    executor = _executor()
+    session = _FakeSession([ORIGINAL, ORIGINAL])
+    executor._session = session
+    state = _state(ORIGINAL)
+    state.latest_ui_hierarchy = "unchanged screen"
+
+    results = [
+        await executor.execute("click", {"target": 1}, f"call-{index}", state)
+        for index in range(3)
+    ]
+
+    assert [result.status for result in results] == ["success", "success", "error"]
+    assert results[-1].metadata["code"] == "NO_PROGRESS"
+    assert len(session.calls) == 2
 
 
 # --- Runner: one snapshot per turn ------------------------------------------------------

@@ -197,11 +197,13 @@ async def mobile_session(
     summary: str | None = None,
     lock_timeout_seconds: float = 30.0,
     idle_timeout_seconds: float = 900.0,
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
     """Open, inspect, or close an external-agent-driven device session.
 
     Operations:
-      - `open`: requires `goal`; optionally pass `device_serial`. With several
+      - `open`: requires `goal` unless `workflow_id` names a prepared test plan;
+        optionally pass `device_serial`. With several
         ready devices, first ask the user to choose a serial. Returns a
         `session_id`; then call `mobile_observe`.
       - `status`: pass `session_id` for one session or omit it to list sessions.
@@ -211,6 +213,8 @@ async def mobile_session(
 
     The session owns the device lock for its full lifetime. An idle watchdog
     cancels abandoned sessions after `idle_timeout_seconds` (minimum 60s).
+    For a source-linked test run, call `mobile_test_context` and
+    `mobile_test_cases` first, then open with their `workflow_id`.
     """
     normalized = operation.strip().lower()
     if normalized == "open":
@@ -221,6 +225,7 @@ async def mobile_session(
             session_id=session_id,
             lock_timeout_seconds=lock_timeout_seconds,
             idle_timeout_seconds=idle_timeout_seconds,
+            workflow_id=workflow_id,
         )
         result["web_ui"] = web_ui
         return result
@@ -256,6 +261,7 @@ async def mobile_act(
     arguments: dict[str, Any] | None = None,
     observation_id: str | None = None,
     include_image: bool = True,
+    case_id: str | None = None,
 ) -> CallToolResult:
     """Execute one device action, observe its result, and persist a WebUI step.
 
@@ -272,12 +278,14 @@ async def mobile_act(
     Screen-targeted actions must pass the latest `observation_id`; stale or
     missing IDs are rejected. Successful actions return a fresh observation
     and screenshot, whose ID must be used for the next screen-targeted action.
+    Planned test sessions must also pass the active `case_id` for every action.
     """
     payload, image_bytes = await _manager.act(
         session_id,
         action=action,
         arguments=arguments,
         observation_id=observation_id,
+        case_id=case_id,
     )
     return _result(payload, image_bytes if include_image else None)
 
@@ -289,6 +297,8 @@ async def mobile_verify(
     status: str,
     evidence: str,
     observation_id: str | None = None,
+    case_id: str | None = None,
+    checkpoint_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist an external-agent verification result into the ARTEMIS WebUI timeline.
 
@@ -296,6 +306,9 @@ async def mobile_verify(
     `passed`, `failed`, or `inconclusive`; `evidence` must state the observable
     device evidence rather than inferred success. Pass the latest
     `observation_id` when the verdict is based on the current screen.
+    For a planned run, pass `case_id`; Pro cases also use `checkpoint_id` for
+    each declared checkpoint, then omit it for the case's final expected result.
+    `assertion` must match that planned checkpoint or final expected result.
     """
     return await _manager.verify(
         session_id,
@@ -303,4 +316,6 @@ async def mobile_verify(
         status=status,
         evidence=evidence,
         observation_id=observation_id,
+        case_id=case_id,
+        checkpoint_id=checkpoint_id,
     )
