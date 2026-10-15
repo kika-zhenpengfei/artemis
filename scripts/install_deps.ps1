@@ -20,8 +20,14 @@
 [CmdletBinding()]
 param(
     [switch]$Launch = $false,
-    [switch]$Open = $false
+    [switch]$Open = $false,
+    [switch]$Codex = $false
 )
+
+if ($Codex) {
+    & (Join-Path $PSScriptRoot "install_codex.ps1") -Launch:$Launch -Open:$Open
+    exit $LASTEXITCODE
+}
 
 $ErrorActionPreference = "Continue"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -225,13 +231,15 @@ function Test-NodeCompatible {
         $verRaw = (& node -v 2>$null)
         if (-not $verRaw) { return $false }
         $verStr = $verRaw.ToString().Trim().TrimStart('v')
+        if ($verStr -notmatch '^\d+\.\d+\.\d+$') { return $false }
         $parts = $verStr.Split('.')
-        if ($parts.Count -ge 2) {
+        if ($parts.Count -eq 3) {
             $major = [int]$parts[0]
             $minor = [int]$parts[1]
+            $patch = [int]$parts[2]
             if ($major -ge 26) { return $true }
             if ($major -eq 24 -and $minor -ge 15) { return $true }
-            if ($major -eq 22 -and $minor -ge 22) { return $true }
+            if ($major -eq 22 -and ($minor -gt 22 -or ($minor -eq 22 -and $patch -ge 3))) { return $true }
         }
     } catch {
         return $false
@@ -376,13 +384,28 @@ if (Test-CommandExists "uv") {
 
 # 3. Setup Python Runtime & Sync Dependencies
 Write-Host "`n3. Configuring Python Runtime & Syncing Dependencies..." -ForegroundColor Yellow
-Write-Host "   [INFO] Running uv sync (auto-provisioning Python >=3.12 & dependencies)..." -ForegroundColor Cyan
-uv sync
+if ($Codex) {
+    if (-not (Test-CommandExists "adb")) {
+        Write-Host "   [FAIL] adb is required. Install Android platform-tools and run this installer again." -ForegroundColor Red
+        Exit 1
+    }
+    Write-Host "   [INFO] Running uv sync --frozen --python 3.12..." -ForegroundColor Cyan
+    uv sync --frozen --python 3.12
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "   [FAIL] Python dependency synchronization failed." -ForegroundColor Red
+        Exit 1
+    }
+} else {
+    Write-Host "   [INFO] Running uv sync (auto-provisioning Python >=3.12 & dependencies)..." -ForegroundColor Cyan
+    uv sync
+}
 Write-Host "   [OK] Dependencies synced successfully." -ForegroundColor Green
 
 # 4. Check .env Configuration
 Write-Host "`n4. Checking Environment Configuration (.env)..." -ForegroundColor Yellow
-if (-not (Test-Path ".env")) {
+if ($Codex) {
+    Write-Host "   [INFO] Codex executor settings will be merged after the WebUI build succeeds." -ForegroundColor Cyan
+} elseif (-not (Test-Path ".env")) {
     if (Test-Path ".env.example") {
         Copy-Item ".env.example" ".env"
         Write-Host "   [OK] Created .env template from .env.example." -ForegroundColor Green
@@ -399,11 +422,11 @@ Write-Host "`n5. Checking Showcase UI Build (Angular)..." -ForegroundColor Yello
 $ShowcaseIndex = "$RootDir\apps\showcase_ui\dist\frontend\browser\index.html"
 $ShowcaseIndexAlt1 = "$RootDir\apps\showcase_ui\dist\browser\index.html"
 $ShowcaseIndexAlt2 = "$RootDir\apps\showcase_ui\dist\index.html"
-if ((-not (Test-Path $ShowcaseIndex)) -and (-not (Test-Path $ShowcaseIndexAlt1)) -and (-not (Test-Path $ShowcaseIndexAlt2))) {
+if ($Codex -or ((-not (Test-Path $ShowcaseIndex)) -and (-not (Test-Path $ShowcaseIndexAlt1)) -and (-not (Test-Path $ShowcaseIndexAlt2)))) {
     if (-not (Test-NodeCompatible)) {
         if (Test-CommandExists "node") {
             $curVer = (& node -v 2>$null)
-            Write-Host "   [WARN] Detected Node.js $curVer, but Angular CLI requires Node.js >= v22.22.0." -ForegroundColor Yellow
+            Write-Host "   [WARN] Detected Node.js $curVer; required versions: ^22.22.3 || ^24.15.0 || >=26.0.0." -ForegroundColor Yellow
         } else {
             Write-Host "   [WARN] Node.js/npm not found (required for Showcase UI)." -ForegroundColor Cyan
         }
@@ -451,34 +474,59 @@ if ((-not (Test-Path $ShowcaseIndex)) -and (-not (Test-Path $ShowcaseIndexAlt1))
         try {
             $npmExec = if (Test-CommandExists "npm.cmd") { "npm.cmd" } else { "npm" }
             Write-Host "   [INFO] Installing frontend npm dependencies..." -ForegroundColor Cyan
-            & $npmExec install --no-audit --no-fund --loglevel=error
-            if ($LASTEXITCODE -ne 0) {
-                Write-Host "   [WARN] npm install returned exit code $LASTEXITCODE. Trying silent install..." -ForegroundColor DarkYellow
-                & $npmExec install --silent
-            }
-            $cliNodeVersion = "$RootDir\apps\showcase_ui\node_modules\@angular\cli\src\utilities\node-version.js"
-            if (Test-Path $cliNodeVersion) {
-                (Get-Content $cliNodeVersion) -replace '22\.22\.3', '22.22.0' | Set-Content $cliNodeVersion
+            if ($Codex) {
+                & $npmExec ci --no-audit --no-fund --loglevel=error
+                if ($LASTEXITCODE -ne 0) {
+                    throw "npm ci failed with exit code $LASTEXITCODE."
+                }
+            } else {
+                & $npmExec install --no-audit --no-fund --loglevel=error
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "   [WARN] npm install returned exit code $LASTEXITCODE. Trying silent install..." -ForegroundColor DarkYellow
+                    & $npmExec install --silent
+                }
             }
             Write-Host "   [INFO] Building Angular frontend application..." -ForegroundColor Cyan
             & $npmExec run build
+            if ($Codex -and $LASTEXITCODE -ne 0) {
+                throw "npm run build failed with exit code $LASTEXITCODE."
+            }
             if (Test-Path $ShowcaseIndex) {
                 Write-Host "   [OK] Showcase UI compiled successfully." -ForegroundColor Green
+            } elseif ($Codex) {
+                throw "WebUI build output was not found: $ShowcaseIndex"
             } elseif (Test-Path $ShowcaseIndexAlt1) {
                 Write-Host "   [OK] Showcase UI compiled successfully." -ForegroundColor Green
             } else {
                 Write-Host "   [WARN] Showcase UI build finished but index.html was not found in expected dist directory." -ForegroundColor DarkYellow
             }
         } catch {
+            if ($Codex) {
+                Write-Host "   [FAIL] Failed to build Showcase UI: $_" -ForegroundColor Red
+                Exit 1
+            }
             Write-Host "   [WARN] Failed to build Showcase UI: $_" -ForegroundColor DarkYellow
         } finally {
             Pop-Location
         }
     } else {
-        Write-Host "   [WARN] Could not configure compatible Node.js (>= 22.22.0). Showcase UI will show fallback notice on launch." -ForegroundColor DarkYellow
+        if ($Codex) {
+            Write-Host "   [FAIL] Compatible Node.js/npm is required: ^22.22.3 || ^24.15.0 || >=26.0.0." -ForegroundColor Red
+            Exit 1
+        }
+        Write-Host "   [WARN] Could not configure compatible Node.js. Showcase UI will show fallback notice on launch." -ForegroundColor DarkYellow
     }
 } else {
     Write-Host "   [OK] Showcase UI build already exists." -ForegroundColor Green
+}
+
+if ($Codex) {
+    Write-Host "`nConfiguring Codex executor and MCP..." -ForegroundColor Yellow
+    uv run --frozen python scripts/configure_codex.py
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "   [FAIL] Codex configuration failed. Correct the error above and run the installer again." -ForegroundColor Red
+        Exit 1
+    }
 }
 
 # 6. Toolchain Readiness Summary
@@ -508,10 +556,23 @@ Write-Host "======================================================" -ForegroundC
 Write-Host "   Artemis Environment Ready!                         " -ForegroundColor Green
 Write-Host "======================================================" -ForegroundColor Cyan
 
+if ($Codex) {
+    Write-Host "Restart Codex to load the ARTEMIS MCP configuration." -ForegroundColor White
+    Write-Host "Connect a phone, enable USB debugging, and accept its USB authorization prompt." -ForegroundColor White
+    Write-Host "Prepare a workflow in Codex, then select an idle device and confirm that workflow in the WebUI." -ForegroundColor White
+}
+
 if ($Launch -or $Open) {
     Start-LocalAdbServer
     Write-Host "[INFO] Launching Showcase UI..." -ForegroundColor Green
-    uv run python -m artemis ui --open
+    if ($Codex) {
+        uv run --frozen python -m artemis ui --open
+        Exit $LASTEXITCODE
+    } else {
+        uv run python -m artemis ui --open
+    }
+} elseif ($Codex) {
+    Write-Host "To start the Showcase UI: uv run --frozen python -m artemis ui --open" -ForegroundColor Cyan
 } else {
     Write-Host "To start the Showcase UI and interactive onboarding:" -ForegroundColor White
     Write-Host "  -> .\start.bat   (or: uv run python -m artemis ui)" -ForegroundColor Cyan

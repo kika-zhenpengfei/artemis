@@ -24,6 +24,7 @@ MANIFEST
 
 # Virtual Environments
 .venv/
+.artemis-tools/
 env/
 venv/
 ENV/

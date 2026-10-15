@@ -77,6 +77,8 @@
 <a id="快速上手"></a>
 ## 快速上手
 
+**Codex 执行模式**：克隆本仓库后运行 `bash install_codex.sh`（macOS / Linux）或 `.\install_codex.bat`（Windows）。缺失工具安装在工程内，不升级系统工具、不修改全局 PATH 或 Codex 全局规则；仅合并 ARTEMIS MCP 配置。完成后重启 Codex、连接手机，直接在 Codex 中发送测试需求。Codex 准备工作流并打开等待设备确认的会话时，会自动启动 WebUI；点击返回的页面链接，选择空闲设备并确认即可开始，无需手动运行终端命令。详见[部署与使用指南](./docs/CODEX_DEPLOYMENT_AND_USAGE_CN.md)。
+
 确保电脑已连接 Android 实体机（已开启 **USB 调试**）或 Android 模拟器。一键启动脚本将会自动完成以下配置：
 - **安装系统环境依赖**：自动检测并安装 ADB、scrcpy、FFmpeg 与 Python（`uv`）运行时及项目依赖。
 - **全局挂载 MCP 服务与测试准则 (Rules)**：主动引导并自动将全局 MCP 服务与 **Artemis 移动端测试思维准则 (`rules.md`)** 挂载至你使用的 AI IDE（支持 **Antigravity**、**Cursor**、**Claude Code**、**Codex**、**Windsurf**、**VS Code**、**Cline/Roo**、**OpenClaw**）。

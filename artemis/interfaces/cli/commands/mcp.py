@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import threading
 import tomllib
@@ -39,16 +40,24 @@ console = Console()
 ARTEMIS_MCP_TOOLS = (
     "mobile_session",
     "mobile_observe",
+    "mobile_prepare_case",
     "mobile_act",
+    "mobile_run_plan",
     "mobile_verify",
+    "mobile_webui_handoff",
     "mobile_test_context",
     "mobile_test_cases",
+    "mobile_test_execution_plan",
     "mobile_test_report",
+    "mobile_test_intakes",
     "mobile_run_task",
     "mobile_manage_task",
     "mobile_get_device_state",
     "mobile_inspect_trace",
     "mobile_diagnose",
+)
+ARTEMIS_EXECUTOR_TOOLS = tuple(
+    name for name in ARTEMIS_MCP_TOOLS if name not in {"mobile_run_task", "mobile_manage_task"}
 )
 
 EXECUTION_MODES = frozenset({"executor", "autonomous"})
@@ -70,6 +79,7 @@ class CodexAgentAdapter:
     default_execution_mode = "executor"
 
     def build_config(self, config_body: dict, config_with_cwd: dict) -> dict:
+        executor_only = config_body["env"]["ARTEMIS_EXECUTION_MODE"] == "executor"
         return {
             "mcp_servers": {
                 "artemis": {
@@ -82,7 +92,10 @@ class CodexAgentAdapter:
                     "enabled": True,
                     "required": True,
                     "startup_timeout_sec": 120,
-                    "enabled_tools": list(ARTEMIS_MCP_TOOLS),
+                    "tool_timeout_sec": 180,
+                    "enabled_tools": list(
+                        ARTEMIS_EXECUTOR_TOOLS if executor_only else ARTEMIS_MCP_TOOLS
+                    ),
                 }
             }
         }
@@ -172,13 +185,20 @@ def _get_config_snippet(
         "ARTEMIS_EXECUTOR_ONLY": "1" if executor_only else "0",
     }
     if executor_only:
+        ui_port = os.environ.get("ARTEMIS_UI_PORT") or "8000"
         server_env.update(
             {
-                "ARTEMIS_AUTO_START_UI": "true",
-                "ARTEMIS_UI_PORT": "8000",
-                "ARTEMIS_AUTO_OPEN_BROWSER": "false",
+                "ARTEMIS_AUTO_START_UI": os.environ.get("ARTEMIS_AUTO_START_UI") or "true",
+                "ARTEMIS_UI_PORT": ui_port,
+                "ARTEMIS_DAEMON_PORT": os.environ.get("ARTEMIS_DAEMON_PORT") or ui_port,
+                "ARTEMIS_AUTO_OPEN_BROWSER": os.environ.get("ARTEMIS_AUTO_OPEN_BROWSER") or "false",
             }
         )
+        if os.environ.get("ARTEMIS_TRACES_DIR"):
+            server_env["ARTEMIS_TRACES_DIR"] = os.environ["ARTEMIS_TRACES_DIR"]
+        if client == "codex" and os.environ.get("PATH"):
+            # Desktop apps may not inherit the shell paths used to install ADB.
+            server_env["PATH"] = os.environ["PATH"]
     config_body = {
         "command": python_exe,
         "args": ["-m", "mcp_server"],
@@ -352,6 +372,36 @@ def _merge_json_file(
         return False
 
 
+def _toml_key(key: str) -> str:
+    return key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else json.dumps(key, ensure_ascii=False)
+
+
+def _toml_value(value: object) -> str:
+    """Serialize MCP settings without discarding user-defined fields."""
+    if isinstance(value, dict):
+        pairs = (f"{_toml_key(key)} = {_toml_value(item)}" for key, item in value.items())
+        return "{ " + ", ".join(pairs) + " }"
+    if isinstance(value, list):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    if isinstance(value, (str, bool, int, float)):
+        return json.dumps(value, ensure_ascii=False, allow_nan=False)
+    raise ValueError(f"Unsupported Codex MCP setting type: {type(value).__name__}")
+
+
+def _backup_file(file_path: Path) -> Path:
+    """Keep each distinct pre-install version, including its file permissions."""
+    original = file_path.read_bytes()
+    backup_path = file_path.with_name(file_path.name + ".bak")
+    suffix = 1
+    while backup_path.exists():
+        if backup_path.read_bytes() == original:
+            return backup_path
+        backup_path = file_path.with_name(f"{file_path.name}.bak.{suffix}")
+        suffix += 1
+    shutil.copy2(file_path, backup_path)
+    return backup_path
+
+
 def _codex_toml_block(server_config: dict) -> str:
     """Renders a managed Codex MCP server block using TOML-compatible JSON strings."""
     command = json.dumps(str(server_config["command"]), ensure_ascii=False)
@@ -368,8 +418,9 @@ def _codex_toml_block(server_config: dict) -> str:
     for key in ("enabled", "required"):
         if key in server_config:
             lines.append(f"{key} = {'true' if server_config[key] else 'false'}")
-    if "startup_timeout_sec" in server_config:
-        lines.append(f"startup_timeout_sec = {int(server_config['startup_timeout_sec'])}")
+    for key in ("startup_timeout_sec", "tool_timeout_sec"):
+        if key in server_config:
+            lines.append(f"{key} = {_toml_value(server_config[key])}")
     if "enabled_tools" in server_config:
         lines.append("enabled_tools = [")
         lines.extend(
@@ -377,10 +428,17 @@ def _codex_toml_block(server_config: dict) -> str:
             for tool_name in server_config["enabled_tools"]
         )
         lines.append("]")
+    managed_keys = {
+        "command", "args", "cwd", "env", "enabled", "required",
+        "startup_timeout_sec", "tool_timeout_sec", "enabled_tools",
+    }
+    for key, value in server_config.items():
+        if key not in managed_keys:
+            lines.append(f"{_toml_key(key)} = {_toml_value(value)}")
     if env:
         lines.extend(["", "[mcp_servers.artemis.env]"])
         for key, value in env.items():
-            lines.append(f"{key} = {json.dumps(str(value), ensure_ascii=False)}")
+            lines.append(f"{_toml_key(key)} = {json.dumps(str(value), ensure_ascii=False)}")
     lines.append("# END ARTEMIS MCP CONFIG")
     return "\n".join(lines) + "\n"
 
@@ -388,9 +446,32 @@ def _codex_toml_block(server_config: dict) -> str:
 def _merge_codex_toml(file_path: Path, server_config: dict) -> bool:
     """Adds or updates Artemis in Codex config.toml while preserving unrelated settings."""
     try:
-        file_path.parent.mkdir(parents=True, exist_ok=True)
         existing = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
-        managed_block = _codex_toml_block(server_config)
+        # Parse before removing any old Artemis block: corrupt content must not
+        # become apparently valid merely because the damaged lines were removed.
+        existing_data = tomllib.loads(existing)
+        old_server = existing_data.get("mcp_servers", {}).get("artemis", {})
+        merged_server = {**old_server, **server_config}
+        for key in ("startup_timeout_sec", "tool_timeout_sec"):
+            if key in old_server:
+                merged_server[key] = old_server[key]
+        merged_env = {**server_config.get("env", {}), **old_server.get("env", {})}
+        current_path = server_config.get("env", {}).get("PATH")
+        if current_path:
+            path_parts = current_path.split(os.pathsep)
+            path_parts.extend(old_server.get("env", {}).get("PATH", "").split(os.pathsep))
+            merged_env["PATH"] = os.pathsep.join(dict.fromkeys(part for part in path_parts if part))
+        for key in (
+            "PYTHONPATH", "PYTHONUNBUFFERED", "ARTEMIS_AGENT_CLIENT",
+            "ARTEMIS_EXECUTION_MODE", "ARTEMIS_EXECUTOR_ONLY",
+        ):
+            if key in server_config.get("env", {}):
+                merged_env[key] = server_config["env"][key]
+        # Older configurations had only UI_PORT; keep the daemon on that port.
+        if "ARTEMIS_UI_PORT" in merged_env and "ARTEMIS_DAEMON_PORT" not in old_server.get("env", {}):
+            merged_env["ARTEMIS_DAEMON_PORT"] = merged_env["ARTEMIS_UI_PORT"]
+        merged_server["env"] = merged_env
+        managed_block = _codex_toml_block(merged_server)
         begin_marker = "# BEGIN ARTEMIS MCP CONFIG"
         end_marker = "# END ARTEMIS MCP CONFIG"
 
@@ -398,7 +479,7 @@ def _merge_codex_toml(file_path: Path, server_config: dict) -> bool:
             managed_pattern = re.compile(
                 rf"(?ms)^{re.escape(begin_marker)}\n.*?^{re.escape(end_marker)}\n?"
             )
-            updated = managed_pattern.sub(managed_block, existing, count=1)
+            updated = managed_pattern.sub(lambda _match: managed_block, existing, count=1)
         else:
             # Remove an older, unmanaged Artemis table before adding the managed block.
             kept_lines: list[str] = []
@@ -407,7 +488,7 @@ def _merge_codex_toml(file_path: Path, server_config: dict) -> bool:
             for line in existing.splitlines(keepends=True):
                 header_match = header_pattern.match(line.rstrip("\r\n"))
                 if header_match:
-                    normalized = re.sub(r"[\s\"']", "", header_match.group(1)).lower()
+                    normalized = re.sub(r"[\s\"']", "", header_match.group(1))
                     skipping_artemis = normalized == "mcp_servers.artemis" or normalized.startswith(
                         "mcp_servers.artemis."
                     )
@@ -416,25 +497,20 @@ def _merge_codex_toml(file_path: Path, server_config: dict) -> bool:
             preserved = "".join(kept_lines).rstrip()
             updated = f"{preserved}\n\n{managed_block}" if preserved else managed_block
 
-        # Never replace a user's config with invalid TOML.
-        tomllib.loads(updated)
+        expected = dict(existing_data)
+        expected["mcp_servers"] = {**existing_data.get("mcp_servers", {}), "artemis": merged_server}
+        # Text replacement cannot handle every valid TOML spelling. Reject any
+        # merge that changes unrelated data instead of guessing at its structure.
+        if tomllib.loads(updated) != expected:
+            raise ValueError("Codex TOML cannot be safely merged; existing settings were preserved")
         if updated != existing:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            if file_path.exists():
+                _backup_file(file_path)
             file_path.write_text(updated, encoding="utf-8")
         return True
     except Exception as e:
-        if file_path.exists():
-            try:
-                backup_path = file_path.with_suffix(file_path.suffix + ".bak")
-                backup_path.write_text(file_path.read_text(encoding="utf-8"), encoding="utf-8")
-                logger.warning(
-                    f"Could not update {file_path}; backup created at {backup_path}: {e}"
-                )
-            except (OSError, UnicodeDecodeError) as backup_exc:
-                logger.warning(
-                    f"Could not update {file_path} ({e}); backup also failed: {backup_exc}"
-                )
-        else:
-            logger.warning(f"Could not create Codex MCP config file {file_path}: {e}")
+        logger.warning(f"Could not update Codex MCP config file {file_path}: {e}")
         return False
 
 
@@ -468,7 +544,7 @@ def _remove_rules_block(file_path: Path) -> bool:
         return False
 
 
-def _inject_rules_block(file_path: Path, content: str) -> bool:
+def _inject_rules_block(file_path: Path, content: str, *, backup: bool = False) -> bool:
     """Injects or updates a managed ARTEMIS block in a global rules file without overwriting user content."""
     try:
         file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -476,12 +552,7 @@ def _inject_rules_block(file_path: Path, content: str) -> bool:
         end_marker = "<!-- END ARTEMIS MOBILE TESTING RULES -->"
         new_block = f"{begin_marker}\n{content.strip()}\n{end_marker}\n"
 
-        existing = ""
-        if file_path.exists():
-            try:
-                existing = file_path.read_text(encoding="utf-8")
-            except Exception:
-                existing = ""
+        existing = file_path.read_text(encoding="utf-8") if file_path.exists() else ""
 
         if begin_marker in existing and end_marker in existing:
             prefix = existing.split(begin_marker)[0]
@@ -493,6 +564,8 @@ def _inject_rules_block(file_path: Path, content: str) -> bool:
         if existing == updated:
             return True
 
+        if backup and file_path.exists():
+            _backup_file(file_path)
         file_path.write_text(updated, encoding="utf-8")
         return True
     except Exception as e:
@@ -655,8 +728,9 @@ def install_rules(client: str, project_root: str) -> list[str]:
                 if override_file.exists() and override_file.read_text(encoding="utf-8").strip()
                 else codex_home / "AGENTS.md"
             )
-            if _inject_rules_block(agents_file, raw_rules):
-                installed_paths.append(str(agents_file))
+            if not _inject_rules_block(agents_file, raw_rules, backup=True):
+                raise RuntimeError(f"Could not install Codex rules at {agents_file}")
+            installed_paths.append(str(agents_file))
         elif target == "zcode":
             agents_file = Path.home() / ".zcode" / "AGENTS.md"
             if _inject_rules_block(agents_file, raw_rules):
@@ -670,8 +744,10 @@ def install_mcp_config(
     python_exe: str,
     project_root: str,
     execution_mode: str | None = None,
+    *,
+    include_rules: bool = True,
 ) -> list[str]:
-    """Auto-installs/merges ARTEMIS MCP configuration and testing rules into IDE config files across any OS."""
+    """Install MCP configuration, optionally including global testing rules."""
     client = _canonical_client(client)
     installed_paths: list[str] = []
     targets = (
@@ -798,8 +874,9 @@ def install_mcp_config(
             server_cfg = snippet["mcp_servers"]["artemis"]
             codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
             codex_path = codex_home / "config.toml"
-            if _merge_codex_toml(codex_path, server_cfg):
-                installed_paths.append(str(codex_path))
+            if not _merge_codex_toml(codex_path, server_cfg):
+                raise RuntimeError(f"Could not safely install Codex MCP config at {codex_path}")
+            installed_paths.append(str(codex_path))
         elif target == "zcode":
             server_cfg = snippet["mcp"]["servers"]["artemis"]
             zcode_path = Path.home() / ".zcode" / "cli" / "config.json"
@@ -812,8 +889,11 @@ def install_mcp_config(
             ):
                 installed_paths.append(str(zcode_path))
 
-    rules_paths = install_rules(client, project_root)
-    installed_paths.extend(rules_paths)
+    if include_rules:
+        rules_paths = install_rules(client, project_root)
+        if client == "codex" and not rules_paths:
+            raise RuntimeError("Codex MCP configuration was installed, but testing rules could not be installed")
+        installed_paths.extend(rules_paths)
 
     unique_paths: list[str] = []
     for p in installed_paths:
@@ -880,6 +960,13 @@ def mcp_command(
             ),
         ),
     ] = None,
+    skip_rules: Annotated[
+        bool,
+        typer.Option(
+            "--skip-rules",
+            help="With --install, configure only MCP without creating or modifying global agent rules.",
+        ),
+    ] = False,
 ) -> None:
     """Launch or configure the ARTEMIS Model Context Protocol (MCP) server."""
     project_root = env_utils.get_project_root()
@@ -915,14 +1002,20 @@ def mcp_command(
                 f"[bold red]Unsupported install target: '{install_config}'. Use 'antigravity', 'claude', 'cursor', 'windsurf', 'vscode', 'cline', 'roo', 'openclaw', 'codex', 'zcode', or 'all'.[/bold red]"
             )
             raise typer.Exit(1)
-        installed_paths = install_mcp_config(
-            client,
-            python_exe,
-            project_root,
-            execution_mode=execution_mode,
-        )
+        try:
+            installed_paths = install_mcp_config(
+                client,
+                python_exe,
+                project_root,
+                execution_mode=execution_mode,
+                include_rules=not skip_rules,
+            )
+        except (RuntimeError, OSError, UnicodeError) as exc:
+            console.print(f"[bold red]ARTEMIS MCP installation failed: {exc}[/bold red]")
+            raise typer.Exit(1) from exc
+        installed_kind = "configuration" if skip_rules else "configuration & rules"
         console.print(
-            "[bold green]✔ Successfully installed ARTEMIS MCP server configuration & rules to:[/bold green]"
+            f"[bold green]✔ Successfully installed ARTEMIS MCP server {installed_kind} to:[/bold green]"
         )
         for path in installed_paths:
             console.print(f"  • [cyan]{path}[/cyan]")

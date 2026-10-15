@@ -15,9 +15,15 @@
 """Unit tests for ARTEMIS Unified CLI application."""
 
 from typer.testing import CliRunner
+import pytest
 from artemis.interfaces.cli.main import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def isolate_codex_config(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / ".codex"))
 
 
 def test_cli_help():
@@ -234,11 +240,16 @@ def test_cli_mcp_generate_config_antigravity():
     assert set(legacy_config["tools"]) == {
         "mobile_session",
         "mobile_observe",
+        "mobile_prepare_case",
         "mobile_act",
+        "mobile_run_plan",
         "mobile_verify",
+        "mobile_webui_handoff",
         "mobile_test_context",
         "mobile_test_cases",
+        "mobile_test_execution_plan",
         "mobile_test_report",
+        "mobile_test_intakes",
         "mobile_run_task",
         "mobile_manage_task",
         "mobile_get_device_state",
@@ -264,7 +275,7 @@ def test_cli_mcp_generate_config_all():
 
 
 def test_cli_mcp_generate_config_codex():
-    """Verify Codex initializes the server and enables every Artemis tool."""
+    """Verify Codex initializes the server and enables all executor tools."""
     from artemis.interfaces.cli.commands.mcp import _get_config_snippet
 
     result = runner.invoke(app, ["mcp", "--generate-config", "codex"])
@@ -274,20 +285,24 @@ def test_cli_mcp_generate_config_codex():
     assert "enabled = true" in result.output
     assert "required = true" in result.output
     assert "startup_timeout_sec = 120" in result.output
+    assert "tool_timeout_sec = 180" in result.output
     assert "enabled_tools" in result.output
-    assert "mobile_run_task" in result.output
-    assert "mobile_manage_task" in result.output
+    assert "mobile_run_task" not in result.output
+    assert "mobile_manage_task" not in result.output
     server_config = _get_config_snippet("codex", "python", "/project")["mcp_servers"]["artemis"]
     assert server_config["enabled_tools"] == [
         "mobile_session",
         "mobile_observe",
+        "mobile_prepare_case",
         "mobile_act",
+        "mobile_run_plan",
         "mobile_verify",
+        "mobile_webui_handoff",
         "mobile_test_context",
         "mobile_test_cases",
+        "mobile_test_execution_plan",
         "mobile_test_report",
-        "mobile_run_task",
-        "mobile_manage_task",
+        "mobile_test_intakes",
         "mobile_get_device_state",
         "mobile_inspect_trace",
         "mobile_diagnose",
@@ -327,6 +342,39 @@ def test_cli_mcp_execution_mode_is_independent_from_agent():
     assert zcode_env["ARTEMIS_EXECUTOR_ONLY"] == "0"
     assert "ARTEMIS_AUTO_START_UI" not in codex_env
     assert "ARTEMIS_AUTO_START_UI" not in zcode_env
+
+
+def test_cli_mcp_tool_lists_match_registered_tools():
+    from artemis.interfaces.cli.commands.mcp import (
+        ARTEMIS_EXECUTOR_TOOLS,
+        ARTEMIS_MCP_TOOLS,
+        _get_config_snippet,
+    )
+    import mcp_server.tools
+
+    assert set(ARTEMIS_MCP_TOOLS) == set(mcp_server.tools.__all__)
+    assert len(ARTEMIS_MCP_TOOLS) == 17
+    assert len(ARTEMIS_EXECUTOR_TOOLS) == 15
+    config = _get_config_snippet("codex", "python", "/project", "autonomous")
+    assert set(config["mcp_servers"]["artemis"]["enabled_tools"]) == set(ARTEMIS_MCP_TOOLS)
+
+
+def test_cli_mcp_codex_captures_installed_runtime_paths(monkeypatch):
+    from artemis.interfaces.cli.commands.mcp import _get_config_snippet
+
+    monkeypatch.setenv("PATH", "/installed/adb:/installed/node:/bin")
+    monkeypatch.setenv("ARTEMIS_UI_PORT", "9000")
+    monkeypatch.delenv("ARTEMIS_DAEMON_PORT", raising=False)
+    monkeypatch.setenv("ARTEMIS_TRACES_DIR", "/custom/traces")
+    monkeypatch.setenv("ARTEMIS_AUTO_START_UI", "false")
+    monkeypatch.setenv("ARTEMIS_AUTO_OPEN_BROWSER", "true")
+    env = _get_config_snippet("codex", "python", "/project")["mcp_servers"]["artemis"]["env"]
+    assert env["PATH"] == "/installed/adb:/installed/node:/bin"
+    assert env["ARTEMIS_UI_PORT"] == "9000"
+    assert env["ARTEMIS_DAEMON_PORT"] == "9000"
+    assert env["ARTEMIS_TRACES_DIR"] == "/custom/traces"
+    assert env["ARTEMIS_AUTO_START_UI"] == "false"
+    assert env["ARTEMIS_AUTO_OPEN_BROWSER"] == "true"
 
 
 def test_cli_mcp_install_antigravity(tmp_path, monkeypatch):
@@ -551,16 +599,20 @@ def test_cli_mcp_install_codex_preserves_config_and_is_idempotent(tmp_path, monk
     assert data["mcp_servers"]["artemis"]["enabled"] is True
     assert data["mcp_servers"]["artemis"]["required"] is True
     assert data["mcp_servers"]["artemis"]["startup_timeout_sec"] == 120
+    assert data["mcp_servers"]["artemis"]["tool_timeout_sec"] == 180
     assert data["mcp_servers"]["artemis"]["enabled_tools"] == [
         "mobile_session",
         "mobile_observe",
+        "mobile_prepare_case",
         "mobile_act",
+        "mobile_run_plan",
         "mobile_verify",
+        "mobile_webui_handoff",
         "mobile_test_context",
         "mobile_test_cases",
+        "mobile_test_execution_plan",
         "mobile_test_report",
-        "mobile_run_task",
-        "mobile_manage_task",
+        "mobile_test_intakes",
         "mobile_get_device_state",
         "mobile_inspect_trace",
         "mobile_diagnose",
@@ -576,6 +628,243 @@ def test_cli_mcp_install_codex_preserves_config_and_is_idempotent(tmp_path, monk
     agents_text = agents_file.read_text(encoding="utf-8")
     assert "Mobile Testing Mindset" in agents_text
     assert agents_text.count("<!-- BEGIN ARTEMIS MOBILE TESTING RULES -->") == 1
+
+
+def test_cli_mcp_install_codex_preserves_custom_env_and_backs_up(tmp_path, monkeypatch):
+    import os
+    import tomllib
+
+    codex_dir = tmp_path / "custom codex"
+    codex_dir.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_dir))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/installed/adb", "/bin"]))
+    monkeypatch.setattr("mcp_server.utils.env_utils.get_project_root", lambda: str(tmp_path))
+    config_file = codex_dir / "config.toml"
+    original = (
+        '# User comment\nmodel = "test-model"\n'
+        '[mcp_servers.Artemis]\ncommand = "other-server"\n'
+        '[mcp_servers.artemis]\ncommand = "old-python"\n'
+        'disabled_tools = ["mobile_get_device_state"]\n'
+        'custom_settings = { review = true }\n'
+        '[mcp_servers.artemis.env]\nARTEMIS_UI_PORT = "9000"\n'
+        'ARTEMIS_TRACES_DIR = "/saved/traces"\n'
+        f'PATH = "{os.pathsep.join(["/saved/adb", "/bin"])}"\n'
+        'ARTEMIS_EXECUTION_MODE = "autonomous"\nPYTHONPATH = "/old/project"\n'
+    )
+    config_file.write_text(original, encoding="utf-8")
+    rules_file = codex_dir / "AGENTS.override.md"
+    original_rules = "# My instructions\nPreserve this text.\n"
+    rules_file.write_text(original_rules, encoding="utf-8")
+
+    result = runner.invoke(app, ["mcp", "--install", "codex", "--mode", "executor"])
+    assert result.exit_code == 0, result.output
+    first_config = config_file.read_text(encoding="utf-8")
+    assert first_config.startswith('# User comment\nmodel = "test-model"')
+    data = tomllib.loads(first_config)
+    assert data["mcp_servers"]["Artemis"]["command"] == "other-server"
+    server = data["mcp_servers"]["artemis"]
+    assert server["disabled_tools"] == ["mobile_get_device_state"]
+    assert server["custom_settings"] == {"review": True}
+    assert server["env"]["ARTEMIS_UI_PORT"] == "9000"
+    assert server["env"]["ARTEMIS_DAEMON_PORT"] == "9000"
+    assert server["env"]["ARTEMIS_TRACES_DIR"] == "/saved/traces"
+    assert server["env"]["PATH"] == os.pathsep.join(["/installed/adb", "/bin", "/saved/adb"])
+    assert server["env"]["PYTHONPATH"] == str(tmp_path)
+    assert server["env"]["ARTEMIS_EXECUTION_MODE"] == "executor"
+    assert (codex_dir / "config.toml.bak").read_text(encoding="utf-8") == original
+    assert (codex_dir / "AGENTS.override.md.bak").read_text(encoding="utf-8") == original_rules
+    first_rules = rules_file.read_text(encoding="utf-8")
+    assert first_rules.startswith(original_rules.strip())
+    assert not (codex_dir / "AGENTS.md").exists()
+
+    second = runner.invoke(app, ["mcp", "--install", "codex", "--mode", "executor"])
+    assert second.exit_code == 0, second.output
+    assert config_file.read_text(encoding="utf-8") == first_config
+    assert rules_file.read_text(encoding="utf-8") == first_rules
+    assert len(list(codex_dir.glob("*.bak*"))) == 2
+
+    # A later distinct change retains the original backup as well.
+    third = runner.invoke(app, ["mcp", "--install", "codex", "--mode", "autonomous"])
+    assert third.exit_code == 0, third.output
+    assert (codex_dir / "config.toml.bak").read_text(encoding="utf-8") == original
+    assert (codex_dir / "config.toml.bak.1").read_text(encoding="utf-8") == first_config
+
+
+@pytest.mark.parametrize("invalid", [
+    '[mcp_servers.artemis]\ncommand = "unterminated\n',
+    '[mcp_servers.artemis]\ncommand = "one"\ncommand = "two"\n',
+])
+def test_cli_mcp_install_codex_refuses_corrupt_toml(tmp_path, invalid):
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    config_file = codex_dir / "config.toml"
+    config_file.write_text(invalid, encoding="utf-8")
+
+    result = runner.invoke(app, ["mcp", "--install", "codex"])
+    assert result.exit_code == 1
+    assert "installation failed" in result.output
+    assert "Successfully installed" not in result.output
+    assert config_file.read_text(encoding="utf-8") == invalid
+    assert not (codex_dir / "AGENTS.md").exists()
+
+
+def test_cli_mcp_install_codex_refuses_rewrite_when_backup_fails(tmp_path, monkeypatch):
+    import shutil
+
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    config_file = codex_dir / "config.toml"
+    original = 'model = "keep-me"\n'
+    config_file.write_text(original, encoding="utf-8")
+
+    def fail_copy(*_args, **_kwargs):
+        raise OSError("Backup disk full")
+
+    monkeypatch.setattr(shutil, "copy2", fail_copy)
+    result = runner.invoke(app, ["mcp", "--install", "codex"])
+    assert result.exit_code == 1
+    assert config_file.read_text(encoding="utf-8") == original
+    assert not (codex_dir / "AGENTS.md").exists()
+
+
+def test_cli_mcp_install_codex_reports_rules_failure(tmp_path):
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    rules_file = codex_dir / "AGENTS.md"
+    original = b"user instructions\xff"
+    rules_file.write_bytes(original)
+
+    result = runner.invoke(app, ["mcp", "--install", "codex"])
+    assert result.exit_code == 1
+    assert "installation failed" in result.output
+    assert "Successfully installed" not in result.output
+    assert rules_file.read_bytes() == original
+
+
+@pytest.mark.parametrize("existing_rules", [False, True])
+def test_cli_mcp_install_codex_skip_rules_preserves_global_environment(
+    tmp_path, monkeypatch, existing_rules
+):
+    import os
+    import tomllib
+
+    codex_dir = tmp_path / ".codex"
+    codex_dir.mkdir()
+    config_file = codex_dir / "config.toml"
+    original_config = (
+        'model = "keep-model"\n'
+        '[mcp_servers.other]\ncommand = "other-tool"\n'
+        '[mcp_servers.other.env]\nPATH = "/other/tools"\n'
+    )
+    config_file.write_text(original_config, encoding="utf-8")
+    rules_files = [codex_dir / "AGENTS.md", codex_dir / "AGENTS.override.md"]
+    # Invalid UTF-8 also proves a skipped rules file is never read or parsed.
+    original_rules = b"Existing user instructions\xff\n"
+    if existing_rules:
+        for path in rules_files:
+            path.write_bytes(original_rules)
+    runtime_path = os.pathsep.join([str(tmp_path / ".artemis-tools" / "bin"), "/bin"])
+    monkeypatch.setenv("PATH", runtime_path)
+    monkeypatch.setattr("mcp_server.utils.env_utils.get_project_root", lambda: str(tmp_path))
+
+    command = ["mcp", "--install", "codex", "--mode", "executor", "--skip-rules"]
+    result = runner.invoke(app, command)
+    assert result.exit_code == 0, result.output
+    assert "configuration & rules" not in result.output
+    first_config = config_file.read_text(encoding="utf-8")
+    installed = tomllib.loads(first_config)
+    assert installed["model"] == "keep-model"
+    assert installed["mcp_servers"]["other"] == {
+        "command": "other-tool", "env": {"PATH": "/other/tools"}
+    }
+    assert installed["mcp_servers"]["artemis"]["env"]["PATH"] == runtime_path
+    assert os.environ["PATH"] == runtime_path
+    assert (codex_dir / "config.toml.bak").read_text(encoding="utf-8") == original_config
+
+    repeated = runner.invoke(app, command)
+    assert repeated.exit_code == 0, repeated.output
+    assert config_file.read_text(encoding="utf-8") == first_config
+    for path in rules_files:
+        if existing_rules:
+            assert path.read_bytes() == original_rules
+        else:
+            assert not path.exists()
+    assert not list(codex_dir.glob("AGENTS*.bak*"))
+
+
+def test_install_mcp_config_without_rules_returns_only_config(tmp_path, monkeypatch):
+    from artemis.interfaces.cli.commands.mcp import install_mcp_config
+
+    def unexpected_rules_install(*_args, **_kwargs):
+        pytest.fail("MCP-only installation must not invoke global rules installation")
+
+    monkeypatch.setattr(
+        "artemis.interfaces.cli.commands.mcp.install_rules", unexpected_rules_install
+    )
+    installed_paths = install_mcp_config(
+        "codex", "python", str(tmp_path), "executor", include_rules=False
+    )
+    assert installed_paths == [str(tmp_path / ".codex" / "config.toml")]
+
+
+def test_codex_toml_reinstall_preserves_windows_path_escaping(tmp_path, monkeypatch):
+    import os
+    import tomllib
+    from artemis.interfaces.cli.commands.mcp import _get_config_snippet, _merge_codex_toml
+
+    monkeypatch.setattr(os, "pathsep", ";")
+    monkeypatch.setenv("PATH", r"C:\Android\platform-tools;C:\Program Files\nodejs")
+    project = r"C:\Users\Tester\ARTEMIS"
+    config = _get_config_snippet("codex", project + r"\.venv\Scripts\python.exe", project)
+    server = config["mcp_servers"]["artemis"]
+    config_file = tmp_path / "config.toml"
+    assert _merge_codex_toml(config_file, server)
+    first = config_file.read_text(encoding="utf-8")
+    assert _merge_codex_toml(config_file, server)
+    assert config_file.read_text(encoding="utf-8") == first
+    installed = tomllib.loads(first)["mcp_servers"]["artemis"]
+    assert installed["cwd"] == project
+    assert installed["env"]["PATH"] == r"C:\Android\platform-tools;C:\Program Files\nodejs"
+
+
+def test_codex_toml_install_preserves_custom_timeouts(tmp_path):
+    import tomllib
+    from artemis.interfaces.cli.commands.mcp import _get_config_snippet, _merge_codex_toml
+
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        '[mcp_servers.artemis]\ncommand = "python"\n'
+        'startup_timeout_sec = 240\ntool_timeout_sec = 360\n',
+        encoding="utf-8",
+    )
+    server = _get_config_snippet("codex", "python", "/project")["mcp_servers"]["artemis"]
+    assert _merge_codex_toml(config_file, server)
+    assert _merge_codex_toml(config_file, server)
+    installed = tomllib.loads(config_file.read_text(encoding="utf-8"))["mcp_servers"]["artemis"]
+    assert installed["startup_timeout_sec"] == 240
+    assert installed["tool_timeout_sec"] == 360
+
+
+def test_codex_toml_reinstall_updates_path_and_is_idempotent(tmp_path, monkeypatch):
+    import os
+    import tomllib
+    from artemis.interfaces.cli.commands.mcp import _get_config_snippet, _merge_codex_toml
+
+    config_file = tmp_path / "config.toml"
+    monkeypatch.setenv("PATH", os.pathsep.join(["/old/adb", "/bin", "$CUSTOM_TOOLS"]))
+    old_server = _get_config_snippet("codex", "python", "/project")["mcp_servers"]["artemis"]
+    assert _merge_codex_toml(config_file, old_server)
+
+    monkeypatch.setenv("PATH", os.pathsep.join(["/new/adb", "/bin", "/new/adb"]))
+    new_server = _get_config_snippet("codex", "python", "/project")["mcp_servers"]["artemis"]
+    assert _merge_codex_toml(config_file, new_server)
+    first = config_file.read_text(encoding="utf-8")
+    installed = tomllib.loads(first)["mcp_servers"]["artemis"]
+    assert installed["env"]["PATH"] == os.pathsep.join(
+        ["/new/adb", "/bin", "/old/adb", "$CUSTOM_TOOLS"]
+    )
+    assert _merge_codex_toml(config_file, new_server)
+    assert config_file.read_text(encoding="utf-8") == first
 
 
 def test_cli_mcp_install_jsonc_and_backup(tmp_path, monkeypatch):

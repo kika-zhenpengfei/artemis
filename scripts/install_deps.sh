@@ -15,6 +15,20 @@
 
 set -euo pipefail
 
+# Keep the Codex entry isolated from the shared-tool installer below.
+CODEX_REQUESTED=false
+CODEX_ARGS=()
+for arg in "$@"; do
+    if [ "${arg}" = "--codex" ]; then
+        CODEX_REQUESTED=true
+    else
+        CODEX_ARGS+=("${arg}")
+    fi
+done
+if [ "${CODEX_REQUESTED}" = true ]; then
+    exec bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/install_codex.sh" ${CODEX_ARGS[@]+"${CODEX_ARGS[@]}"}
+fi
+
 # Visual styling
 BOLD='\033[1m'
 GREEN='\033[0;32m'
@@ -26,10 +40,23 @@ DIM='\033[2m'
 NC='\033[0m'
 
 AUTO_LAUNCH=false
+CODEX_MODE=false
 for arg in "$@"; do
     case "${arg}" in
         --launch|-l|--open)
             AUTO_LAUNCH=true
+            ;;
+        --codex)
+            CODEX_MODE=true
+            ;;
+        --help|-h)
+            echo "Usage: bash scripts/install_deps.sh [--codex] [--launch]"
+            echo "--codex: install locked dependencies, rebuild WebUI, and configure Codex executor."
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: ${arg}" >&2
+            exit 2
             ;;
     esac
 done
@@ -116,23 +143,27 @@ request_sudo() {
     return 1
 }
 
-# Helper to check if Node.js & npm meet Angular CLI 22 requirement (>= 22.22.0, >= 24.15.0, or >= 26.0.0)
+# Match the Angular version range in package-lock.json.
 is_node_compatible() {
     if ! has_cmd node || ! has_cmd npm; then
         return 1
     fi
     local node_ver
     node_ver="$(node -v 2>/dev/null | tr -d 'v')"
-    [ -z "${node_ver}" ] && return 1
-    local major minor
+    [[ "${node_ver}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+    local major minor patch
     major="$(echo "${node_ver}" | cut -d. -f1)"
     minor="$(echo "${node_ver}" | cut -d. -f2)"
+    patch="$(echo "${node_ver}" | cut -d. -f3)"
     if [ "${major}" -ge 26 ] 2>/dev/null; then
         return 0
-    elif [ "${major}" -ge 24 ] 2>/dev/null; then
+    elif [ "${major}" -eq 24 ] 2>/dev/null; then
         [ "${minor}" -ge 15 ] 2>/dev/null && return 0
-    elif [ "${major}" -ge 22 ] 2>/dev/null; then
-        [ "${minor}" -ge 22 ] 2>/dev/null && return 0
+    elif [ "${major}" -eq 22 ] 2>/dev/null; then
+        [ "${minor}" -gt 22 ] 2>/dev/null && return 0
+        if [ "${minor}" -eq 22 ] && [ "${patch}" -ge 3 ] 2>/dev/null; then
+            return 0
+        fi
     fi
     return 1
 }
@@ -143,7 +174,7 @@ echo -e "   Root Dir: ${DIM}${ROOT_DIR}${NC}"
 
 # Function to install system toolchains (ADB, FFmpeg, scrcpy)
 install_system_packages() {
-    echo -e "\n${BOLD}2. Checking System Toolchains (ADB, FFmpeg, scrcpy)...${NC}"
+    echo -e "\n${BOLD}3. Checking System Toolchains (ADB, FFmpeg, scrcpy)...${NC}"
 
     local need_adb=false
     local need_ffmpeg=false
@@ -275,28 +306,42 @@ install_system_packages() {
             fi
         fi
 
-        # User-space fallback for adb if missing and no root privileges
-        if ! has_cmd adb; then
-            if [[ "${ARCH_TYPE}" = "x86_64" || "${ARCH_TYPE}" = "amd64" ]]; then
-                local PT_DIR="${HOME}/.local/share/platform-tools"
-                if [ ! -x "${PT_DIR}/adb" ]; then
-                    echo -e "   ${CYAN}📦 Installing Android platform-tools (adb) in user space...${NC}"
-                    local TEMP_ZIP="/tmp/platform-tools-$$.zip"
-                    if curl -fsSL --connect-timeout 5 --max-time 30 "https://dl.google.com/android/repository/platform-tools-latest-linux.zip" -o "${TEMP_ZIP}" 2>/dev/null; then
-                        mkdir -p "${HOME}/.local/share" "${HOME}/.local/bin"
-                        if has_cmd unzip; then
-                            unzip -q -o "${TEMP_ZIP}" -d "${HOME}/.local/share" 2>/dev/null || true
-                        else
-                            python3 -m zipfile -e "${TEMP_ZIP}" "${HOME}/.local/share" 2>/dev/null || true
-                        fi
-                        rm -f "${TEMP_ZIP}"
+    fi
+
+    # Google's macOS archive supports Intel and Apple Silicon; Linux is x64 only.
+    if ! has_cmd adb; then
+        local PT_OS=""
+        if [ "${OS_TYPE}" = "Darwin" ]; then
+            PT_OS="darwin"
+        elif [ "${OS_TYPE}" = "Linux" ] && [[ "${ARCH_TYPE}" = "x86_64" || "${ARCH_TYPE}" = "amd64" ]]; then
+            PT_OS="linux"
+        fi
+        if [ -n "${PT_OS}" ]; then
+            local PT_DIR="${HOME}/.local/share/platform-tools"
+            if [ ! -x "${PT_DIR}/adb" ]; then
+                echo -e "   ${CYAN}📦 Installing Android platform-tools (adb) in user space...${NC}"
+                local TEMP_ZIP
+                TEMP_ZIP="$(mktemp "${TMPDIR:-/tmp}/artemis-platform-tools.XXXXXX")"
+                if curl -fsSL --connect-timeout 5 --max-time 120 "https://dl.google.com/android/repository/platform-tools-latest-${PT_OS}.zip" -o "${TEMP_ZIP}"; then
+                    mkdir -p "${HOME}/.local/share" "${HOME}/.local/bin"
+                    if has_cmd unzip; then
+                        unzip -q -o "${TEMP_ZIP}" -d "${HOME}/.local/share" 2>/dev/null || true
+                    elif has_cmd python3; then
+                        python3 -m zipfile -e "${TEMP_ZIP}" "${HOME}/.local/share" 2>/dev/null || true
+                    else
+                        uv run --no-project --python 3.12 python -m zipfile -e "${TEMP_ZIP}" "${HOME}/.local/share" || true
+                    fi
+                    # Python's zipfile does not restore Unix executable bits.
+                    if [ -f "${PT_DIR}/adb" ]; then
+                        chmod +x "${PT_DIR}/adb"
                     fi
                 fi
-                if [ -x "${PT_DIR}/adb" ]; then
-                    ln -sf "${PT_DIR}/adb" "${HOME}/.local/bin/adb"
-                    export PATH="${PT_DIR}:${PATH}"
-                    echo -e "   ${GREEN}✓ adb installed in user space.${NC}"
-                fi
+                rm -f "${TEMP_ZIP}"
+            fi
+            if [ -x "${PT_DIR}/adb" ]; then
+                ln -sf "${PT_DIR}/adb" "${HOME}/.local/bin/adb"
+                export PATH="${PT_DIR}:${PATH}"
+                echo -e "   ${GREEN}✓ adb installed in user space.${NC}"
             fi
         fi
     fi
@@ -309,7 +354,7 @@ install_system_packages() {
 
 # Function to ensure uv is installed and ready
 ensure_uv() {
-    echo -e "\n${BOLD}3. Checking Python Package Manager (uv)...${NC}"
+    echo -e "\n${BOLD}2. Checking Python Package Manager (uv)...${NC}"
     if ! has_cmd uv; then
         echo -e "   ${YELLOW}uv not found. Installing Astral uv (ultra-fast Python package manager)...${NC}"
         curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -334,7 +379,8 @@ ensure_uv() {
         uv_bin="$(command -v uv)"
     fi
 
-    if [ -n "${uv_bin}" ]; then
+    # Codex receives this PATH directly; it needs no system-wide uv symlink.
+    if [ -n "${uv_bin}" ] && [ "${CODEX_MODE}" = false ]; then
         if [ -w "/usr/local/bin" ]; then
             ln -sf "${uv_bin}" /usr/local/bin/uv 2>/dev/null || true
             [ -x "${HOME}/.local/bin/uvx" ] && ln -sf "${HOME}/.local/bin/uvx" /usr/local/bin/uvx 2>/dev/null || true
@@ -356,12 +402,20 @@ ensure_uv() {
 setup_python_env() {
     echo -e "\n${BOLD}4. Configuring Python Runtime & Syncing Dependencies...${NC}"
     echo -e "   ${BLUE}📦 Running uv sync (auto-provisioning Python >=3.12 & dependencies)...${NC}"
-    uv sync
+    if [ "${CODEX_MODE}" = true ]; then
+        uv sync --frozen --python 3.12
+    else
+        uv sync
+    fi
     echo -e "   ${GREEN}✓ Python runtime and dependencies synced successfully.${NC}"
 }
 
 # Function to initialize .env configuration
 setup_env_file() {
+    if [ "${CODEX_MODE}" = true ]; then
+        # configure_codex.py preserves existing values and backs up changes.
+        return 0
+    fi
     echo -e "\n${BOLD}5. Checking Environment Configuration (.env)...${NC}"
     if [ ! -f ".env" ]; then
         if [ -f ".env.example" ]; then
@@ -382,7 +436,7 @@ setup_showcase_ui() {
     local SHOWCASE_INDEX="${ROOT_DIR}/apps/showcase_ui/dist/frontend/browser/index.html"
     local SHOWCASE_INDEX_ALT1="${ROOT_DIR}/apps/showcase_ui/dist/browser/index.html"
     local SHOWCASE_INDEX_ALT2="${ROOT_DIR}/apps/showcase_ui/dist/index.html"
-    if [ ! -f "${SHOWCASE_INDEX}" ] && [ ! -f "${SHOWCASE_INDEX_ALT1}" ] && [ ! -f "${SHOWCASE_INDEX_ALT2}" ]; then
+    if [ "${CODEX_MODE}" = true ] || { [ ! -f "${SHOWCASE_INDEX}" ] && [ ! -f "${SHOWCASE_INDEX_ALT1}" ] && [ ! -f "${SHOWCASE_INDEX_ALT2}" ]; }; then
         # Try loading nvm if available in user environment
         export NVM_DIR="${HOME}/.nvm"
         if [ -s "${NVM_DIR}/nvm.sh" ]; then
@@ -401,7 +455,7 @@ setup_showcase_ui() {
         if ! is_node_compatible; then
             if has_cmd node; then
                 local current_node="$(node -v 2>/dev/null)"
-                echo -e "   ${YELLOW}⚡ Detected Node.js ${current_node}, but Angular CLI requires Node.js >= v22.22.0. Upgrading Node.js...${NC}"
+                echo -e "   ${YELLOW}⚡ Detected Node.js ${current_node}; Angular requires ^22.22.3 || ^24.15.0 || >=26.0.0. Upgrading...${NC}"
             else
                 echo -e "   ${YELLOW}⚡ Node.js/npm not found. Auto-installing Node.js 22 LTS for Showcase UI compilation...${NC}"
             fi
@@ -420,7 +474,7 @@ setup_showcase_ui() {
 
             # 3. Try Linux package managers with sudo / root
             if ! is_node_compatible && [ "${OS_TYPE}" = "Linux" ]; then
-                if request_sudo "install or upgrade Node.js to >= 22.22.0"; then
+                if request_sudo "install or upgrade Node.js to a supported version"; then
                     local SUDO_PREFIX=""
                     if [ "$(id -u)" -ne 0 ]; then SUDO_PREFIX="sudo"; fi
                     if has_cmd apt-get; then
@@ -468,20 +522,23 @@ setup_showcase_ui() {
             echo -e "   ${YELLOW}🎨 Building Angular Showcase UI...${NC}"
             (
                 cd "${ROOT_DIR}/apps/showcase_ui"
-                npm install --silent
-                CLI_NODE_VERSION="${ROOT_DIR}/apps/showcase_ui/node_modules/@angular/cli/src/utilities/node-version.js"
-                if [ -f "${CLI_NODE_VERSION}" ]; then
-                    if [ "${OS_TYPE}" = "Darwin" ]; then
-                        sed -i '' 's/22\.22\.3/22.22.0/g' "${CLI_NODE_VERSION}" 2>/dev/null || true
-                    else
-                        sed -i 's/22\.22\.3/22.22.0/g' "${CLI_NODE_VERSION}" 2>/dev/null || true
-                    fi
+                if [ "${CODEX_MODE}" = true ]; then
+                    npm ci --no-audit --no-fund
+                else
+                    npm install --silent
                 fi
                 npm run build
             )
+            if [ "${CODEX_MODE}" = true ] && [ ! -f "${SHOWCASE_INDEX}" ]; then
+                echo "WebUI build did not produce ${SHOWCASE_INDEX}" >&2
+                exit 1
+            fi
             echo -e "   ${GREEN}✓ Showcase UI compiled successfully.${NC}"
         else
-            echo -e "   ${YELLOW}⚠ Could not configure compatible Node.js (>= 22.22.0). Showcase UI will show fallback notice on launch.${NC}"
+            echo -e "   ${YELLOW}⚠ Could not configure compatible Node.js (^22.22.3 || ^24.15.0 || >=26.0.0).${NC}"
+            if [ "${CODEX_MODE}" = true ]; then
+                exit 1
+            fi
         fi
     else
         echo -e "   ${GREEN}✓ Showcase UI build already exists.${NC}"
@@ -511,12 +568,19 @@ verify_readiness() {
 }
 
 # Run setup workflow
-install_system_packages
 ensure_uv
+install_system_packages
+if [ "${CODEX_MODE}" = true ] && ! has_cmd adb; then
+    echo "ADB installation failed. Install Android SDK Platform Tools and rerun this installer." >&2
+    exit 1
+fi
 setup_python_env
 setup_env_file
 setup_showcase_ui
 verify_readiness
+if [ "${CODEX_MODE}" = true ]; then
+    uv run --frozen python scripts/configure_codex.py
+fi
 
 echo -e "\n${BOLD}${CYAN}======================================================${NC}"
 echo -e "${BOLD}${GREEN}   ✨ Artemis Environment Ready!                      ${NC}"
@@ -524,7 +588,11 @@ echo -e "${BOLD}${CYAN}======================================================${N
 
 if [ "${AUTO_LAUNCH}" = true ]; then
     echo -e "\n${GREEN}🚀 Auto-launching Showcase UI...${NC}"
-    exec uv run artemis ui --open
+    exec uv run --frozen python -m artemis ui --open
+elif [ "${CODEX_MODE}" = true ]; then
+    echo "Restart Codex to load ARTEMIS MCP. Connect and authorize your Android device."
+    echo "For each test: let Codex prepare the workflow, then select an idle device and confirm in WebUI."
+    echo "Start WebUI: uv run --frozen python -m artemis ui --no-open"
 else
     echo -e "To launch the unified UI & live device onboarding:"
     echo -e "  👉 ${BOLD}${CYAN}./start.sh${NC}   (Recommended - automatically sets up environment)"
