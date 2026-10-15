@@ -250,11 +250,17 @@ def test_blackboard_metrics_include_structured_failures(tmp_path):
     assert board.metrics()["failure_categories"] == {"timeout": 1}
 
 
-def test_session_deletion_removes_video_blackboard_rows(tmp_path):
+def test_session_deletion_removes_video_blackboard_rows(tmp_path, monkeypatch):
     from uuid import uuid4
 
     from artemis.data_engine.engine import DataEngine
 
+    monkeypatch.setattr("artemis.data_engine.engine.PAUSE_FILE", tmp_path / "pause")
+    monkeypatch.setattr("artemis.data_engine.engine.read_ipc_port", lambda: None)
+    monkeypatch.setattr("artemis.data_engine.engine.get_ipc_port_file", lambda: tmp_path / "ipc-port")
+    locks = tmp_path / "locks"
+    locks.mkdir()
+    monkeypatch.setattr("artemis.runtime.device_lock.get_temp_dir", lambda _: locks)
     ctx = MagicMock(spec=ArtemisContext)
     ctx.execution_setup = MagicMock(traces_path=str(tmp_path / "traces"))
     ctx.device = None
@@ -269,6 +275,7 @@ def test_session_deletion_removes_video_blackboard_rows(tmp_path):
     board.add_observation({"start": 0.0, "end": 1.0, "target": "cleanup", "summary": "evidence"})
     assert board.list_observations()
 
+    engine.end_session()
     engine.storage.delete_session(session_id)
 
     reopened = VideoBlackboard(f"video:{video_id}", db_path=engine.storage.db_path)

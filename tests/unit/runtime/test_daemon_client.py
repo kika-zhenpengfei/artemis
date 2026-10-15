@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import json
+import io
+import urllib.error
 from unittest.mock import MagicMock, patch
 import pytest
 
@@ -129,6 +131,17 @@ def test_submit_task_to_daemon():
         assert data["session_id"] == "custom-sess-789"
         assert data["ingress"] == "mcp"
         assert data["conversation_id"] == "conv-123"
+
+
+@pytest.mark.parametrize("status", [409, 503])
+def test_daemon_device_rejection_is_preserved_without_a_client_idle_flag(status):
+    error = urllib.error.HTTPError(
+        "http://127.0.0.1:8000/api/run", status, "Device unavailable", {},
+        io.BytesIO(b'{"detail": "Selected phone-a is busy"}'),
+    )
+    with patch("urllib.request.urlopen", side_effect=error):
+        result = submit_task_to_daemon("Check display", ingress="cli")
+    assert result == {"status": "rejected", "error": "Selected phone-a is busy"}
 
 
 def _daemon_ok_response(body: bytes) -> MagicMock:

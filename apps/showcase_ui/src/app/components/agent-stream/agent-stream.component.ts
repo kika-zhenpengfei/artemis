@@ -16,13 +16,12 @@
 
 import { Component, ChangeDetectionStrategy, NgZone, signal, computed, effect, inject, untracked, DestroyRef, AfterViewInit } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
-import { HttpClient } from '@angular/common/http';
 import { AgentService, StartupProgressEvent } from '../../services/agent.service';
 import { Session, ModelInfo, SessionUsage } from '../../core/models/session.model';
 import { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote } from '../../core/models/markdown.model';
 import { OverlayModule, ConnectedPosition } from '@angular/cdk/overlay';
+import { TestWorkflowPanelComponent } from '../test-workflow-panel/test-workflow-panel.component';
 import { StepBlock, PhaseBlock, StepEvent, ActionParam, CheckerResult, StreamResetNotice, DEFAULT_STREAM_RESET_MESSAGE } from '../../core/models/stream.model';
 import {
   contextPercent,
@@ -233,14 +232,13 @@ export type { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote, StreamRe
 @Component({
   selector: 'app-agent-stream',
   standalone: true,
-  imports: [CommonModule, FormsModule, OverlayModule],
+  imports: [CommonModule, OverlayModule, TestWorkflowPanelComponent],
   templateUrl: './agent-stream.component.html',
   styleUrl: './agent-stream.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush
 })
 export class AgentStreamComponent implements AfterViewInit {
   public agentService = inject(AgentService);
-  private http = inject(HttpClient);
   private destroyRef = inject(DestroyRef);
   private zone = inject(NgZone);
 
@@ -399,14 +397,17 @@ export class AgentStreamComponent implements AfterViewInit {
   });
 
   // Top Nav Notes Computed Properties
-  public currentNoteContent = computed(() => {
-    const notes = this.agentService.currentNotes();
-    const key = this.agentService.selectedNoteKey();
-    return notes[key] || '';
+  public noteKeys = computed(() => this.agentService.getNoteKeys());
+
+  public currentNoteKey = computed(() => {
+    const keys = this.noteKeys();
+    const selected = this.agentService.selectedNoteKey();
+    return keys.includes(selected) ? selected
+      : keys.includes('task_plan.md') ? 'task_plan.md' : keys[0] || '';
   });
 
-  public noteKeys = computed(() => {
-    return Object.keys(this.agentService.currentNotes()).filter(key => key.toLowerCase().endsWith('.md'));
+  public currentNoteContent = computed(() => {
+    return this.agentService.currentNotes()[this.currentNoteKey()] || '';
   });
 
 
@@ -827,19 +828,7 @@ export class AgentStreamComponent implements AfterViewInit {
     this.isNotesDropdownOpen.update((v) => !v);
     if (this.isNotesDropdownOpen()) {
       this.isTaskDropdownOpen.set(false);
-      this.agentService.fetchPreparedTestWorkflows();
-      const sessionId = this.agentService.currentSessionId();
-      if (sessionId) {
-        this.agentService.fetchTestWorkflow(sessionId);
-      }
     }
-  }
-
-  public selectPreparedTestWorkflow(workflowId: string, event: Event): void {
-    event.stopPropagation();
-    this.agentService.selectSession(workflowId, true);
-    this.agentService.fetchTestWorkflow(workflowId);
-    this.agentService.fetchNotes(workflowId);
   }
 
   public openOutputterNote(event?: Event): void {
@@ -2095,8 +2084,14 @@ export class AgentStreamComponent implements AfterViewInit {
   }
 
   public onToolKeyClick(key: string): void {
-    this.agentService.selectedNoteKey.set(key);
-    this.agentService.activeTab.set('notes');
+    if (this.agentService.isReportNote(key)) {
+      this.agentService.selectedReportKey.set(key);
+      this.agentService.activeTab.set('report');
+      this.isNotesDropdownOpen.set(false);
+    } else {
+      this.agentService.selectedNoteKey.set(key);
+      this.agentService.activeTab.set('notes');
+    }
     
     const sessionId = this.agentService.currentSessionId();
     if (sessionId) {

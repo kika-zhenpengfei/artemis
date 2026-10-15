@@ -202,80 +202,7 @@ limitations under the License.
           <span class="material-symbols-outlined">description</span>
           <span>Notes, Plans & Test Cases</span>
         </div>
-        @if (agentService.preparedTestWorkflows().length) {
-          <div class="prepared-tests-heading">Prepared plans</div>
-          @for (prepared of agentService.preparedTestWorkflows(); track prepared.workflow_id) {
-            <button type="button" class="prepared-test-button"
-              [class.selected]="agentService.currentSessionId() === prepared.workflow_id"
-              (click)="selectPreparedTestWorkflow(prepared.workflow_id, $event)">
-              <span>{{ prepared.goal }}</span>
-              <small>Executor {{ prepared.profile | uppercase }} · {{ prepared.case_count }} cases</small>
-            </button>
-          }
-        }
-        @if (agentService.currentTestWorkflow(); as workflow) {
-          <section class="test-cases-section" aria-label="Test cases">
-            <div class="test-cases-heading">
-              <strong>Core test cases</strong>
-              <span>Executor {{ workflow.profile | uppercase }} · {{ workflow.phase }}</span>
-            </div>
-            <div class="test-cases-summary">
-              {{ workflow.counts.passed }} passed · {{ workflow.counts.failed }} failed ·
-              {{ workflow.counts.inconclusive }} inconclusive · {{ workflow.counts.not_run }} not run
-            </div>
-            @for (testCase of workflow.cases; track testCase.id) {
-              <details class="test-case-card">
-                <summary>
-                  <span>{{ testCase.id }} · {{ testCase.title }}</span>
-                  <span class="test-case-status" [ngClass]="testCase.status">
-                    {{ testCase.status.replace('_', ' ') }}
-                  </span>
-                </summary>
-                <div class="test-case-body">
-                  @for (requirement of workflow.requirements; track requirement.id) {
-                    @if (testCase.requirement_ids.includes(requirement.id)) {
-                      <div class="test-case-requirement">
-                        <strong>{{ requirement.id }}:</strong> {{ requirement.description }}
-                        @for (ref of requirement.code_refs; track ref.path + ':' + ref.line) {
-                          <div class="test-case-code">{{ ref.path }}:{{ ref.line }} · {{ ref.reason }}</div>
-                        }
-                      </div>
-                    }
-                  }
-                  @if (testCase.preconditions.length) {
-                    <strong>Preconditions</strong>
-                    <ul>
-                      @for (precondition of testCase.preconditions; track $index) {
-                        <li>{{ precondition }}</li>
-                      }
-                    </ul>
-                  }
-                  <strong>Steps</strong>
-                  <ol>
-                    @for (step of testCase.steps; track $index) {
-                      <li>{{ step }}</li>
-                    }
-                  </ol>
-                  <div><strong>Expected:</strong> {{ testCase.expected_result }}</div>
-                  @for (checkpoint of testCase.checkpoints; track checkpoint.id) {
-                    <div><strong>Checkpoint {{ checkpoint.id }}:</strong> {{ checkpoint.assertion }}</div>
-                  }
-                  @for (action of testCase.actions; track action.step_id) {
-                    <div class="test-case-evidence">
-                      Action {{ action.action }} · {{ action.status }} · trace {{ action.step_id }}
-                    </div>
-                  }
-                  @for (verification of testCase.verifications; track verification.step_id) {
-                    <div class="test-case-evidence">
-                      <strong>{{ verification.checkpoint_id || 'Final' }} · {{ verification.status }}:</strong>
-                      {{ verification.evidence }}
-                    </div>
-                  }
-                </div>
-              </details>
-            }
-          </section>
-        }
+        <app-test-workflow-panel />
         <!-- Notes Selector / Pills (Shown if there are note files) -->
         @if (noteKeys().length > 1) {
           <div class="notes-selector-container">
@@ -283,7 +210,7 @@ limitations under the License.
               @for (key of noteKeys(); track trackNoteKey($index, key)) {
                 <button
                   class="note-selector-pill"
-                  [class.active]="agentService.selectedNoteKey() === key"
+                  [class.active]="currentNoteKey() === key"
                   (click)="selectNote(key, $event)"
                   >
                   <span class="material-symbols-outlined pill-icon">draft</span>

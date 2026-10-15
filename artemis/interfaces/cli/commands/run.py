@@ -26,6 +26,7 @@ from artemis.config import checker_overrides_for_level, initialize_llm_config, s
 from artemis.utils.startup_progress import publish_startup_progress
 from artemis import Agent, Builders
 from artemis.sdk.types.task import AgentProfile
+from artemis.runtime.device_selection import DeviceSelectionError, resolve_device_selection_sync
 from artemis.utils.cli_helpers import display_device_status
 from artemis.utils.logger import get_logger
 from artemis.utils.video import check_ffmpeg_available
@@ -356,6 +357,13 @@ def run_command(
         or os.environ.get("ARTEMIS_DEVICE_QUEUE_TICKET") is not None
     )
     is_standalone = standalone or os.environ.get("ARTEMIS_STANDALONE") == "1"
+    require_idle = False
+    if not is_worker:
+        try:
+            device_serial, require_idle = resolve_device_selection_sync(device_serial)
+        except DeviceSelectionError as exc:
+            console.print(f"[bold red]Task rejected:[/bold red] {exc}")
+            raise SystemExit(1) from exc
 
     # All platforms route through unified Artemis Daemon unless specifically configured as standalone
     if not is_worker and not is_standalone:
@@ -386,7 +394,11 @@ def run_command(
                     session_id=target_sid,
                     ingress="cli",
                     base_url=base_url,
+                    **({"require_idle": True} if require_idle else {}),
                 )
+                if resp and resp.get("status") == "rejected":
+                    console.print(f"[bold red]Task rejected:[/bold red] {resp.get('error', 'Device unavailable')}")
+                    raise SystemExit(1)
                 if resp and resp.get("tasks"):
                     console.print(
                         f"[bold green]✓[/bold green] Task scheduled in unified queue (Session: [cyan]{target_sid}[/cyan])"
@@ -439,6 +451,13 @@ def run_command(
             console.print(
                 f"[yellow]Daemon routing notice: {exc}. Falling back to local execution...[/yellow]"
             )
+
+    if require_idle:
+        try:
+            device_serial, _ = resolve_device_selection_sync(device_serial, require_idle=True)
+        except DeviceSelectionError as exc:
+            console.print(f"[bold red]Task rejected:[/bold red] {exc}")
+            raise SystemExit(1) from exc
 
     adb_client = None
     try:

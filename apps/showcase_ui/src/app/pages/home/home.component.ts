@@ -31,6 +31,10 @@ import {
   SuggestionCategory
 } from '../../core/data/smart-tasks.data';
 import { TaskRecommendationService } from '../../core/services/task-recommendation.service';
+import { TestWorkflowPanelComponent } from '../../components/test-workflow-panel/test-workflow-panel.component';
+import { DeviceSelectorComponent } from '../../components/device-selector/device-selector.component';
+import { WorkflowDeviceQueueComponent } from '../../components/workflow-device-queue/workflow-device-queue.component';
+import { DeviceSelectionService } from '../../services/device-selection.service';
 import {
   DEFAULT_EXPLORER_MODE,
   DEFAULT_VERIFICATION_LEVEL,
@@ -103,7 +107,7 @@ type AdbGuideTab = 'emulator' | 'usb' | 'wifi' | 'remote';
 @Component({
   selector: 'app-home',
   standalone: true,
-  imports: [FormsModule],
+  imports: [FormsModule, TestWorkflowPanelComponent, DeviceSelectorComponent, WorkflowDeviceQueueComponent],
   templateUrl: './home.component.html',
   changeDetection: ChangeDetectionStrategy.Eager,
   styleUrl: './home.component.scss'
@@ -111,11 +115,12 @@ type AdbGuideTab = 'emulator' | 'usb' | 'wifi' | 'remote';
 export class HomeComponent implements OnInit, OnDestroy {
   public agentService = inject(AgentService);
   public systemService = inject(SystemService);
+  public deviceSelection = inject(DeviceSelectionService);
   public taskRecService = inject(TaskRecommendationService);
   private router = inject(Router);
 
-  // High-level navigation mode: 'diagnostics' (System Setup Guide) vs 'launcher' (Task Execution)
-  public activeTab = signal<'diagnostics' | 'launcher'>('launcher');
+  // Home sections for setup, autonomous tasks, and test plans.
+  public activeTab = signal<'diagnostics' | 'launcher' | 'tests'>('launcher');
 
   // Interactive guide sub-tab inside the ADB section
   public activeAdbGuideTab = signal<AdbGuideTab>('emulator');
@@ -367,6 +372,9 @@ export class HomeComponent implements OnInit, OnDestroy {
   public isCredentialsReady = computed(() => this.systemService.isCredentialsReady());
   public isSkipCredentialsCheck = computed(() => this.systemService.isSkipCredentialsCheck());
   public isDeviceReady = computed(() => this.systemService.isDeviceReady());
+  public canLaunchTask = computed(() =>
+    this.isEnvironmentReady() && this.isCredentialsReady() && this.deviceSelection.canStart()
+  );
 
   // Device information
   public activeDevice = computed(() => this.systemService.activeDevice());
@@ -559,7 +567,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     window.removeEventListener('focus', this.focusListener);
   }
 
-  public setTab(tab: 'diagnostics' | 'launcher'): void {
+  public setTab(tab: 'diagnostics' | 'launcher' | 'tests'): void {
     this.activeTab.set(tab);
     if (tab === 'diagnostics') {
       this.systemService.fetchReadiness().subscribe();
@@ -1008,7 +1016,7 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.systemService.dismissEmulatorStatus().subscribe();
   }
 
-  public selectTargetDevice(serial: string): void {
+  public selectDiagnosticDevice(serial: string): void {
     this.systemService.selectDevice(serial).subscribe();
   }
 
@@ -1067,15 +1075,23 @@ export class HomeComponent implements OnInit, OnDestroy {
   }
 
   public runTask(): void {
+    if (this.isSubmitting()) {
+      return;
+    }
     const goal = this.taskGoal().trim();
     if (!goal) {
       this.errorMessage.set('Please enter a task goal before running.');
       return;
     }
 
-    if (!this.isReady()) {
+    if (!this.isEnvironmentReady() || !this.isCredentialsReady()) {
       this.errorMessage.set('System prerequisites are not satisfied. Please review System Setup first.');
       this.activeTab.set('diagnostics');
+      return;
+    }
+
+    if (!this.deviceSelection.canStart()) {
+      this.errorMessage.set('Select an idle online device before starting a task.');
       return;
     }
 

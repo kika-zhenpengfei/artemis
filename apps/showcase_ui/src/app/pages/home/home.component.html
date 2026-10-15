@@ -66,8 +66,30 @@
           }
           <span class="tab-label">Launch Autonomous Task</span>
         </button>
+        <button
+          type="button"
+          class="mode-tab-btn"
+          [class.active]="activeTab() === 'tests'"
+          (click)="setTab('tests')"
+        >
+          <span class="material-symbols-outlined tab-icon">checklist</span>
+          <span class="tab-label">Test Plans</span>
+        </button>
       </div>
     </div>
+
+    @if (activeTab() !== 'tests') {
+      <app-device-selector [disabled]="isSubmitting()" />
+    }
+
+    @if (activeTab() === 'tests') {
+      <section class="test-plans-view">
+        <h2>Test plans and results</h2>
+        <p>Confirm a device for each waiting workflow, then review cases and results.</p>
+        <app-workflow-device-queue />
+        <app-test-workflow-panel />
+      </section>
+    }
 
     <!-- ========================================================================= -->
     <!-- VIEW 1: SYSTEM SETUP & FOOLPROOF STEP-BY-STEP GUIDANCE                    -->
@@ -752,21 +774,21 @@
                 <!-- Multi-Device Switcher if multiple devices detected -->
                 @if (connectedDevices().length > 1) {
                   <div class="multi-device-switcher">
-                    <span class="switcher-label">Select Active Device:</span>
+                    <span class="switcher-label">Diagnostic device:</span>
                     <div class="switcher-chips">
                       @for (dev of connectedDevices(); track dev.serial) {
                         <button
                           type="button"
                           class="device-chip-btn"
                           [class.selected]="dev.serial === activeDevice()?.serial"
-                          (click)="selectTargetDevice(dev.serial)"
+                          (click)="selectDiagnosticDevice(dev.serial)"
                         >
                           <span class="material-symbols-outlined chip-icon">
                             phone_android
                           </span>
                           <span>{{ dev.model || dev.serial }}</span>
                           @if (dev.serial === activeDevice()?.serial) {
-                            <span class="active-check">✓ Active</span>
+                            <span class="active-check">✓ Inspecting</span>
                           }
                         </button>
                       }
@@ -1563,21 +1585,21 @@
                 <!-- Multi-Device Switcher if multiple devices detected -->
                 @if (connectedDevices().length > 1) {
                   <div class="multi-device-switcher" style="margin-top: 12px;">
-                    <span class="switcher-label">Select Active Device:</span>
+                    <span class="switcher-label">Diagnostic device:</span>
                     <div class="switcher-chips">
                       @for (dev of connectedDevices(); track dev.serial) {
                         <button
                           type="button"
                           class="device-chip-btn"
                           [class.selected]="dev.serial === activeDevice()?.serial"
-                          (click)="selectTargetDevice(dev.serial)"
+                          (click)="selectDiagnosticDevice(dev.serial)"
                         >
                           <span class="material-symbols-outlined chip-icon">
                             phone_android
                           </span>
                           <span>{{ dev.model || dev.serial }}</span>
                           @if (dev.serial === activeDevice()?.serial) {
-                            <span class="active-check">✓ Active</span>
+                            <span class="active-check">✓ Inspecting</span>
                           }
                         </button>
                       }
@@ -1706,13 +1728,11 @@
       <section class="task-launcher-view">
 
         <!-- Prerequisites Drop Alert if any blocker probe is not passing -->
-        @if (hasReadinessReport() && !isReady()) {
+        @if (hasReadinessReport() && (!isEnvironmentReady() || !isCredentialsReady())) {
           <div class="launcher-warning-bar" (click)="setTab('diagnostics')">
-            <span class="material-symbols-outlined warn-icon">{{ adbProbe()?.summary === 'Device Locked' ? 'lock' : 'warning' }}</span>
+            <span class="material-symbols-outlined warn-icon">warning</span>
             <span>
-              {{ adbProbe()?.summary === 'Device Locked'
-                ? 'Android device is locked. Unlock it and enter the home screen before running a task.'
-                : 'Prerequisites incomplete: runtime, credentials, or Android device is not ready. Click here to open Setup Guide.' }}
+              Prerequisites incomplete: runtime or credentials are not ready. Click here to open Setup Guide.
             </span>
             <span class="material-symbols-outlined arrow">arrow_forward</span>
           </div>
@@ -1820,8 +1840,8 @@
                 type="button"
                 class="btn-run-composer"
                 [class.btn-run-pro]="selectedProfile() === 'pro'"
-                [disabled]="!taskGoal().trim() || isSubmitting() || !isReady()"
-                [title]="!isReady() ? (adbProbe()?.summary === 'Device Locked' ? 'Unlock the Android device before running' : 'Complete System Setup before running') : 'Run task'"
+                [disabled]="!taskGoal().trim() || isSubmitting() || !canLaunchTask()"
+                [title]="!deviceSelection.canStart() ? 'Select an idle online device first' : !canLaunchTask() ? 'Complete System Setup before running' : 'Run task'"
                 (click)="runTask()"
               >
                 @if (isSubmitting()) {

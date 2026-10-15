@@ -35,6 +35,9 @@ from artemis.runtime import (
     submit_task_to_daemon,
     trace_store,
 )
+from artemis.runtime.adb_endpoint import current_adb_endpoint
+from artemis.runtime.device_lock import DeviceBusyError
+from artemis.runtime.device_selection import DeviceSelectionError, resolve_device_selection_sync
 
 # Seconds the spawned runner gets to finish its imports and open its log files
 # before the spawn is declared dead. Normal startup creates stdout.log within a
@@ -264,9 +267,12 @@ def mobile_run_task(
           writes a report to `output.md` in `notes_dir`. Ignored for Flash.
         device_serial: Optional device serial (e.g. "emulator-5554") to bind
           execution to a specific device; distinct devices run concurrently.
-          If omitted, an available device is selected automatically. When
-          several devices are attached, confirm the target with the user first
-          (`adb devices -l` lists serials and authorization states).
+          If omitted, the saved WebUI device selection is used and must still
+          be online and idle; it never falls back to another device. Without
+          a saved selection, an available device is selected automatically.
+          When several devices are attached and no target was selected,
+          confirm it with the user first (`adb devices -l` lists serials
+          and authorization states).
         verification_level: Optional, Pro only. Coarse Checker preset: `"off"`
           (no audit; the Operator self-reports), `"final"` (one exit review
           against the goal, the default), `"checkpoints"` (every plan
@@ -288,6 +294,12 @@ def mobile_run_task(
 
     # 1. Generate a unique trace_id
     trace_id = str(uuid.uuid4())
+    selection_error = None
+    require_idle = False
+    try:
+        device_serial, require_idle = resolve_device_selection_sync(device_serial)
+    except DeviceSelectionError as exc:
+        selection_error = str(exc)
 
     # 2. Initialize the trace store directory and status.json
     trace_store.init_trace(
@@ -297,6 +309,9 @@ def mobile_run_task(
         conversation_id=conversation_id,
         device_serial=device_serial,
     )
+    if selection_error:
+        trace_store.update_trace_status(trace_id, "failed", error=selection_error)
+        return {"trace_id": trace_id, "status": "failed", "error": selection_error}
 
     # 2b. Strict device binding: an explicitly requested serial must be attached and
     # authorized. Rejecting here prevents the task from silently running on a
@@ -326,6 +341,7 @@ def mobile_run_task(
                     verification_level=verification_level,
                     explorer_mode=explorer_mode,
                     base_url=base_url,
+                    **({"require_idle": True} if require_idle else {}),
                 )
                 if resp and resp.get("status") == "rejected":
                     rejection_error = resp.get("error") or "Task rejected by Artemis Daemon."
@@ -442,7 +458,22 @@ def mobile_run_task(
     }
     if device_serial:
         reserve_kwargs["device_id"] = device_serial
-    queue_ticket = DeviceExecutionLock.reserve(**reserve_kwargs)
+    admission_lock = None
+    if require_idle:
+        admission_lock = DeviceExecutionLock(
+            device_serial, description="Reserve selected device",
+            lock_scope=current_adb_endpoint().identity,
+        )
+        try:
+            admission_lock.acquire(blocking=False)
+        except DeviceBusyError as exc:
+            trace_store.update_trace_status(trace_id, "failed", error=str(exc))
+            return {"trace_id": trace_id, "status": "failed", "error": str(exc)}
+    try:
+        queue_ticket = DeviceExecutionLock.reserve(**reserve_kwargs)
+    finally:
+        if admission_lock is not None:
+            admission_lock.release()
 
     # 5. Spawn the background task runner as an independent subprocess
     try:

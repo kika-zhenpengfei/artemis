@@ -21,13 +21,16 @@ import { AgentService } from '../../services/agent.service';
 import { Session } from '../../core/models/session.model';
 import { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote } from '../../core/models/markdown.model';
 import { parseNote, parseNoteLines } from '../../utils/markdown-parser.util';
+import { TestWorkflowPanelComponent } from '../test-workflow-panel/test-workflow-panel.component';
+import { DeviceSelectorComponent } from '../device-selector/device-selector.component';
+import { WorkflowDeviceQueueComponent } from '../workflow-device-queue/workflow-device-queue.component';
 
 export type { MarkdownSegment, MarkdownLine, NoteMilestone, ParsedNote };
 
 @Component({
   selector: 'app-chat-interface',
   standalone: true,
-  imports: [CommonModule, FormsModule],
+  imports: [CommonModule, FormsModule, TestWorkflowPanelComponent, DeviceSelectorComponent, WorkflowDeviceQueueComponent],
   templateUrl: './chat-interface.component.html',
   styleUrl: './chat-interface.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush
@@ -225,14 +228,19 @@ export class ChatInterfaceComponent {
   }
 
   // Notes Computed Properties
-  public currentNoteContent = computed(() => {
-    const notes = this.agentService.currentNotes();
-    const key = this.agentService.selectedNoteKey();
-    return notes[key] || '';
+  public noteKeys = computed(() => {
+    return this.agentService.getNoteKeys(this.agentService.activeTab() === 'report' ? 'report' : 'notes');
   });
 
-  public noteKeys = computed(() => {
-    return Object.keys(this.agentService.currentNotes()).filter(key => key.toLowerCase().endsWith('.md'));
+  public selectedDocumentKey = computed(() => {
+    const selected = this.agentService.activeTab() === 'report'
+      ? this.agentService.selectedReportKey() : this.agentService.selectedNoteKey();
+    const keys = this.noteKeys();
+    return keys.includes(selected) ? selected : keys[0] ?? '';
+  });
+
+  public currentNoteContent = computed(() => {
+    return this.agentService.currentNotes()[this.selectedDocumentKey()] || '';
   });
 
   public parsedNote = computed<ParsedNote>(() => {
@@ -248,7 +256,11 @@ export class ChatInterfaceComponent {
   }
 
   public selectNote(key: string): void {
-    this.agentService.selectedNoteKey.set(key);
+    if (this.agentService.activeTab() === 'report') {
+      this.agentService.selectedReportKey.set(key);
+    } else {
+      this.agentService.selectedNoteKey.set(key);
+    }
   }
 
   public trackSession(index: number, session: Session): string {

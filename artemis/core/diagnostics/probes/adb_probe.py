@@ -388,6 +388,21 @@ class AdbDeviceProbe(BaseProbe):
             )
 
         ready_serials = [serial for serial, state in device_states if state == "device"]
+        if target_serial and target_serial not in ready_serials:
+            return ProbeResult(
+                id=self.probe_id,
+                category=self.category,
+                title="Device / Emulator Connected",
+                status=ProbeStatus.WARN,
+                is_blocker=self.is_blocker,
+                summary="Lock State Unknown",
+                description=f"Selected Android device {target_serial} is not ready; its lock-screen state could not be verified.",
+                metadata={
+                    "installed": True,
+                    "submission_probe": True,
+                    "active_device": {"serial": target_serial, "is_locked": None},
+                },
+            )
         if not ready_serials:
             states = {state for _, state in device_states}
             summary = "Device Unauthorized" if "unauthorized" in states else "No Device Found"
@@ -423,8 +438,8 @@ class AdbDeviceProbe(BaseProbe):
             timeout_seconds=1.0,
         )
 
-        # If preferred device is locked or unknown, check remaining ready devices for an unlocked one
-        if is_locked is not False and len(ready_serials) > 1:
+        # Only automatic selection may switch away from a locked preferred device.
+        if not target_serial and is_locked is not False and len(ready_serials) > 1:
             for candidate in ready_serials:
                 if candidate == preferred:
                     continue

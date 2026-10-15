@@ -1084,6 +1084,33 @@ class StorageManager:
         return traces
 
     def clear_all_data(self):
+        """Delete inactive session history while retaining batch replay protection."""
+        from artemis.runtime.task_batch_store import delete_batch_history
+
+        self._ensure_history_inactive()
+        with delete_batch_history(self.base_trace_dir):
+            self._clear_all_data()
+
+    def _ensure_history_inactive(self, session_id: str | None = None) -> None:
+        from artemis.runtime.device_lock import DeviceExecutionLock
+        from artemis.runtime.process_probe import pid_is_alive
+        from artemis.runtime.task_batch_store import TaskBatchHistoryError
+
+        owners = DeviceExecutionLock.get_active_owners().values()
+        queued = DeviceExecutionLock.get_queued_tasks()
+        occupied = any(session_id is None or owner.session_id == session_id for owner in owners)
+        occupied = occupied or any(session_id is None or item.get("session_id") == session_id for item in queued)
+        with self._get_connection() as conn:
+            query = "SELECT pid FROM sessions WHERE status IN ('running', 'paused')"
+            params = ()
+            if session_id is not None:
+                query += " AND session_id = ?"
+                params = (session_id,)
+            occupied = occupied or any(row["pid"] and pid_is_alive(row["pid"]) for row in conn.execute(query, params))
+        if occupied:
+            raise TaskBatchHistoryError("Stop the running or queued tasks before deleting their history.", 409)
+
+    def _clear_all_data(self):
         """Clear all data from SQLite tables and delete session directories."""
         with self._get_connection() as conn:
             conn.execute("PRAGMA foreign_keys = OFF")
@@ -1141,6 +1168,14 @@ class StorageManager:
             return False
 
     def delete_session(self, session_id: UUID):
+        """Delete an inactive session and remove it from associated batch views."""
+        from artemis.runtime.task_batch_store import delete_batch_history
+
+        self._ensure_history_inactive(str(session_id))
+        with delete_batch_history(self.base_trace_dir, str(session_id)):
+            self._delete_session(session_id)
+
+    def _delete_session(self, session_id: UUID):
         """Delete all data associated with a session, including files on disk."""
         session_id_str = str(session_id)
 

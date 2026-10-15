@@ -13,14 +13,22 @@
 # limitations under the License.
 
 import asyncio
+import base64
 import json
 import time
 from uuid import UUID
-from fastapi import APIRouter, HTTPException
+from typing import Any
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
+from pydantic import BaseModel, Field
 
 from artemis.config import DB_PATH, TRACES_PATH
 from artemis.device_execution.test_workflow import TestWorkflowStore
+from artemis.device_execution.test_intake import TestIntakeStore, browse_repository_directory
+from artemis.device_execution.workflow_runner import PreparedWorkflowRunner
+from artemis.device_execution.workflow_start import WorkflowStartError, WorkflowStartStore
 from artemis.runtime import trace_store
+from artemis.runtime.task_batch_store import TaskBatchHistoryError
+from artemis.runtime.device_selection import DeviceSelectionError, check_adb_endpoint, resolve_device_selection
 
 try:
     from admin_console.core.state import state
@@ -37,12 +45,273 @@ except ImportError:
 
 
 router = APIRouter(tags=["sessions"])
+_prepared_runs: dict[str, asyncio.Task] = {}
+_prepared_runners: dict[str, PreparedWorkflowRunner] = {}
+
+
+class PreparedRunRequest(BaseModel):
+    device_serial: str | None = None
+    require_idle: bool = False
+    expected_adb_endpoint_id: str | None = None
+
+
+class WorkflowDeviceRequest(BaseModel):
+    device_serial: str = Field(min_length=1)
+    expected_adb_endpoint_id: str = Field(min_length=1)
+
+
+class PreparedControlRequest(BaseModel):
+    operation: str
+    action: str | None = None
+    arguments: dict[str, Any] | None = None
+    observation_id: str | None = None
+    case_id: str | None = None
+    checkpoint_id: str | None = None
+    assertion: str | None = None
+    status: str | None = None
+    evidence: str | None = None
+    resume_token: str | None = None
+    settle_ms: int = 0
+    wait_for_change: bool = False
+    timeout_ms: int = 15000
+    poll_interval_ms: int = 1000
+
+
+@router.get("/api/source_repositories/browse")
+async def browse_source_repositories(request: Request, path: str | None = None):
+    """Browse directories on the same local machine as the WebUI server."""
+    if request.client is None or request.client.host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(status_code=403, detail="Source directory browsing is local only")
+    try:
+        return await asyncio.to_thread(browse_repository_directory, path)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/api/test_intakes")
+async def create_test_intake(
+    goal: str = Form(...),
+    repository_root: str = Form(...),
+    apk: UploadFile = File(...),
+):
+    """Store one APK and the exact local source checkout for Codex planning."""
+    try:
+        return await asyncio.to_thread(
+            TestIntakeStore().create,
+            goal=goal, repository_root=repository_root,
+            apk=apk.file,
+        )
+    except (ValueError, OSError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await apk.close()
+
+
+@router.get("/api/test_intakes")
+async def list_test_intakes():
+    return await asyncio.to_thread(TestIntakeStore().list)
+
+
+@router.get("/api/test_intakes/{intake_id}")
+async def get_test_intake(intake_id: str):
+    try:
+        return await asyncio.to_thread(TestIntakeStore().read, intake_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/api/test_workflows/prepared")
 async def list_prepared_test_workflows():
     """Plans are visible before they acquire a device session."""
     return await asyncio.to_thread(TestWorkflowStore().list_prepared)
+
+
+@router.get("/api/test_workflows/waiting")
+async def list_waiting_test_workflows():
+    """Expose prepared workflows independently of running device sessions."""
+    return {"workflows": await asyncio.to_thread(WorkflowStartStore().list_pending)}
+
+
+@router.post("/api/test_workflows/{workflow_id}/confirm_device")
+async def confirm_test_workflow_device(workflow_id: str, request: WorkflowDeviceRequest):
+    """Confirm this workflow's device; its waiting Codex process starts execution."""
+    store = WorkflowStartStore()
+    try:
+        await asyncio.to_thread(store.status, workflow_id)
+        endpoint = check_adb_endpoint(request.expected_adb_endpoint_id)
+        device_serial, _ = await resolve_device_selection(
+            request.device_serial, require_idle=True,
+            expected_adb_endpoint_id=endpoint.identity,
+        )
+        return await asyncio.to_thread(
+            store.confirm, workflow_id, device_serial, endpoint.identity,
+        )
+    except (DeviceSelectionError, WorkflowStartError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/api/test_workflows/{workflow_id}/run")
+async def run_prepared_test_workflow(workflow_id: str, request: PreparedRunRequest):
+    """Launch a source-linked fixed plan; the existing report endpoint tracks progress."""
+    active = _prepared_runs.get(workflow_id)
+    if active and not active.done():
+        raise HTTPException(status_code=409, detail="This test workflow is already running")
+    if workflow_id in _prepared_runners:
+        raise HTTPException(status_code=409, detail="This test workflow is waiting for Codex")
+    runner = PreparedWorkflowRunner()
+    try:
+        runner.validate(workflow_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        start = await asyncio.to_thread(WorkflowStartStore().status, workflow_id)
+        if start["status"] == "awaiting_device":
+            return start
+        if start["status"] != "confirmed":
+            raise WorkflowStartError("This test workflow is already starting or running")
+        if request.device_serial and request.device_serial != start["device_serial"]:
+            raise WorkflowStartError("Device must match this workflow's WebUI confirmation")
+        endpoint = check_adb_endpoint(start["adb_endpoint_id"])
+        check_adb_endpoint(request.expected_adb_endpoint_id)
+        device_serial, require_idle = await resolve_device_selection(
+            start["device_serial"], require_idle=True,
+            expected_adb_endpoint_id=endpoint.identity,
+        )
+    except (DeviceSelectionError, WorkflowStartError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Device enumeration yields; another request may have started this workflow.
+    active = _prepared_runs.get(workflow_id)
+    if active and not active.done():
+        raise HTTPException(status_code=409, detail="This test workflow is already running")
+    if workflow_id in _prepared_runners:
+        raise HTTPException(status_code=409, detail="This test workflow is waiting for Codex")
+
+    async def execute():
+        try:
+            result = await runner.run(
+                workflow_id, device_serial=device_serial,
+                **({"require_idle": True} if require_idle else {}),
+                **({"expected_adb_endpoint_id": endpoint.identity} if require_idle or request.expected_adb_endpoint_id else {}),
+            )
+        except Exception as exc:
+            result = {"workflow_id": workflow_id, "status": "failed", "error": str(exc)}
+        if result["status"] != "handoff":
+            _prepared_runners.pop(workflow_id, None)
+        return result
+
+    _prepared_runners[workflow_id] = runner
+    _prepared_runs[workflow_id] = asyncio.create_task(execute())
+    return {"workflow_id": workflow_id, "status": "starting"}
+
+
+@router.get("/api/test_workflows/{workflow_id}/run_status")
+async def prepared_test_workflow_run_status(workflow_id: str):
+    task = _prepared_runs.get(workflow_id)
+    if task is None:
+        return {"workflow_id": workflow_id, "status": "not_started"}
+    if not task.done():
+        return {"workflow_id": workflow_id, "status": "running"}
+    if task.cancelled():
+        return {"workflow_id": workflow_id, "status": "cancelled"}
+    result = task.result()
+    if result.get("status") == "handoff":
+        runner = _prepared_runners.get(workflow_id)
+        if runner:
+            lease = await runner.manager.status(workflow_id)
+            if lease["status"] == "closed":
+                _prepared_runners.pop(workflow_id, None)
+                return {
+                    "workflow_id": workflow_id,
+                    "status": "failed",
+                    "error": "Codex handoff expired because its device session closed.",
+                }
+    return result
+
+
+@router.post("/api/test_workflows/{workflow_id}/control")
+async def control_prepared_test_workflow(
+    workflow_id: str, command: PreparedControlRequest, request: Request
+):
+    """Local MCP bridge to the device lease retained during a Codex handoff."""
+    if request.client and request.client.host not in {"127.0.0.1", "::1"}:
+        raise HTTPException(status_code=403, detail="Codex handoff control is local only")
+    runner = _prepared_runners.get(workflow_id)
+    if runner is None:
+        raise HTTPException(status_code=404, detail="WebUI test workflow is not active")
+    task = _prepared_runs.get(workflow_id)
+    if task and not task.done():
+        raise HTTPException(status_code=409, detail="Fixed plan execution is still running")
+    if runner.active_case_id is None:
+        raise HTTPException(status_code=409, detail="No Codex handoff is active")
+    if command.case_id and command.case_id != runner.active_case_id:
+        raise HTTPException(status_code=422, detail="case_id must match the active handoff")
+    operation = command.operation.strip().lower()
+    async with runner.control_lock:
+        active_task = _prepared_runs.get(workflow_id)
+        if active_task and not active_task.done():
+            raise HTTPException(status_code=409, detail="Fixed plan execution is still running")
+        if runner.active_case_id is None:
+            raise HTTPException(status_code=409, detail="No Codex handoff is active")
+        try:
+            if operation == "observe":
+                result, image = await runner.manager.observe(
+                    workflow_id, settle_ms=command.settle_ms,
+                    wait_for_change=command.wait_for_change,
+                    timeout_ms=command.timeout_ms,
+                    poll_interval_ms=command.poll_interval_ms,
+                )
+            elif operation == "act":
+                if not command.action:
+                    raise ValueError("action is required")
+                result, image = await runner.manager.act(
+                    workflow_id, action=command.action, arguments=command.arguments,
+                    observation_id=command.observation_id, case_id=runner.active_case_id,
+                )
+            elif operation == "verify":
+                if not command.assertion or not command.status or not command.evidence:
+                    raise ValueError("assertion, status, and evidence are required")
+                result = await runner.manager.verify(
+                    workflow_id, assertion=command.assertion, status=command.status,
+                    evidence=command.evidence, observation_id=command.observation_id,
+                    case_id=runner.active_case_id, checkpoint_id=command.checkpoint_id,
+                )
+                image = None
+            elif operation == "resume":
+                if not command.resume_token:
+                    raise ValueError("resume_token is required")
+
+                async def continue_run():
+                    async with runner.control_lock:
+                        try:
+                            resumed = await runner.resume(workflow_id, command.resume_token)
+                        except Exception as exc:
+                            resumed = {
+                                "workflow_id": workflow_id, "status": "failed", "error": str(exc)
+                            }
+                    if resumed["status"] != "handoff":
+                        _prepared_runners.pop(workflow_id, None)
+                    return resumed
+
+                _prepared_runs[workflow_id] = asyncio.create_task(continue_run())
+                return {"workflow_id": workflow_id, "status": "starting"}
+            elif operation == "close":
+                result = await runner.close(workflow_id, status=command.status or "cancelled")
+                _prepared_runners.pop(workflow_id, None)
+                _prepared_runs[workflow_id] = asyncio.create_task(asyncio.sleep(0, result=result))
+                image = None
+            else:
+                raise ValueError("operation must be observe, act, verify, resume, or close")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if image:
+        result["image_base64"] = base64.b64encode(image).decode("ascii")
+    return result
 
 
 @router.get("/api/sessions")
@@ -230,12 +499,15 @@ async def cleanup_history_endpoint():
     try:
         from artemis.data_engine.storage import StorageManager
 
+        _ensure_history_inactive()
         storage = StorageManager(DB_PATH, TRACES_PATH)
         storage.clear_all_data()
         return {
             "status": "success",
             "message": "History cleaned up successfully",
         }
+    except (HTTPException, TaskBatchHistoryError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "detail", str(exc))) from exc
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -245,11 +517,25 @@ async def delete_session_endpoint(session_id: str):
     try:
         from artemis.data_engine.storage import StorageManager
 
+        _ensure_history_inactive(session_id)
         storage = StorageManager(DB_PATH, TRACES_PATH)
         storage.delete_session(UUID(session_id))
         return {
             "status": "success",
             "message": f"Session {session_id} deleted successfully",
         }
+    except (HTTPException, TaskBatchHistoryError) as exc:
+        raise HTTPException(status_code=exc.status_code, detail=getattr(exc, "detail", str(exc))) from exc
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def _ensure_history_inactive(session_id: str | None = None) -> None:
+    active = set(state.active_runs) | set(state.active_connections)
+    active.update(
+        str(item.get("session_id")) for item in state.queue_items
+        if item.get("status") in {"pending", "queued", "running", "paused"}
+    )
+    blocked = bool(active) if session_id is None else session_id in active
+    if blocked:
+        raise HTTPException(status_code=409, detail="Stop the running or queued tasks before deleting their history.")

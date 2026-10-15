@@ -82,23 +82,54 @@ export interface SessionUsage {
 export interface TestWorkflow {
   workflow_id: string;
   goal: string;
+  source_revision?: { commit: string | null; working_tree_dirty: boolean | null } | null;
   profile: 'flash' | 'pro' | null;
   phase: 'context' | 'planned' | 'running' | 'finished';
-  counts: Record<'passed' | 'failed' | 'inconclusive' | 'not_run', number>;
+  counts: Record<'passed' | 'failed' | 'inconclusive' | 'blocked' | 'not_run', number>;
   requirements: {
     id: string;
     description: string;
     code_refs: { path: string; line: number; reason: string }[];
   }[];
+  execution_plans?: Record<string, {
+    steps: {
+      kind: 'auto' | 'model';
+      action?: string;
+      goal?: string;
+      checkpoint_id?: string | null;
+    }[];
+  }>;
+  execution_state?: Record<string, {
+    cursor: number;
+    done?: boolean;
+    handoff?: { reason: string } | null;
+    metrics?: {
+      fixed_actions?: number;
+      device_action_ms?: number;
+      post_action_observe_ms?: number;
+      handoffs?: number;
+      handoff_wait_ms?: number;
+    };
+  }>;
   cases: {
     id: string;
     title: string;
     requirement_ids: string[];
     preconditions: string[];
+    environment?: {
+      package_name: string;
+      reset: 'none' | 'clear_data' | 'reinstall';
+      apk_path?: string | null;
+      apk_sha256?: string | null;
+      checks: unknown[];
+      set_settings?: { namespace: string; key: string; value: string }[];
+    } | null;
+    preparation?: { status: 'ready' | 'blocked'; reason?: string | null; evidence: string[] } | null;
+    restoration?: { status: 'restored' | 'failed'; evidence: string[]; errors: string[] } | null;
     steps: string[];
     expected_result: string;
     checkpoints: { id: string; assertion: string }[];
-    status: 'passed' | 'failed' | 'inconclusive' | 'not_run';
+    status: 'passed' | 'failed' | 'inconclusive' | 'blocked' | 'not_run';
     actions: { action: string; status: string; step_id: string }[];
     verifications: {
       checkpoint_id: string | null;
@@ -108,14 +139,6 @@ export interface TestWorkflow {
       step_id: string;
     }[];
   }[];
-}
-
-export interface PreparedTestWorkflow {
-  workflow_id: string;
-  goal: string;
-  profile: 'flash' | 'pro';
-  case_count: number;
-  created_at: number;
 }
 
 export type AgentStatus = 'idle' | 'running' | 'completed' | 'offline' | string;

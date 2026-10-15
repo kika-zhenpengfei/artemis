@@ -26,6 +26,7 @@ import time
 from typing import Any
 
 from artemis.runtime.device_lock import DeviceExecutionLock
+from artemis.runtime.adb_endpoint import current_adb_endpoint
 from artemis.toolchain import toolchain
 from artemis.utils.logger import get_logger
 
@@ -46,6 +47,7 @@ class DeviceStatus:
     active_task_desc: str | None = None
     active_session_id: str | None = None
     acquired_at: str | None = None
+    queued_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +61,7 @@ class DeviceStatus:
             "active_task_desc": self.active_task_desc,
             "active_session_id": self.active_session_id,
             "acquired_at": self.acquired_at,
+            "queued_count": self.queued_count,
         }
 
 
@@ -302,6 +305,8 @@ class DevicePool:
         self, raw_devices: list[tuple[str, str, str | None, str | None]]
     ) -> list[DeviceStatus]:
         active_owners = DeviceExecutionLock.get_active_owners()
+        scope = os.getenv(DeviceExecutionLock.LOCK_SCOPE_ENV) or current_adb_endpoint().identity
+        queued = DeviceExecutionLock.get_queued_tasks()
 
         devices: list[DeviceStatus] = []
         for serial, state, model, product in raw_devices:
@@ -310,11 +315,13 @@ class DevicePool:
             )
             clean_id = DeviceExecutionLock._normalize_lock_id(
                 serial,
-                os.getenv(DeviceExecutionLock.LOCK_SCOPE_ENV) or None,
+                scope,
             )
             owner = active_owners.get(clean_id) or active_owners.get(
                 DeviceExecutionLock._normalize_device_id(serial)
             )
+            if owner and owner.lock_scope and owner.lock_scope != scope:
+                owner = None
 
             status = DeviceStatus(
                 serial=serial,
@@ -327,6 +334,11 @@ class DevicePool:
                 active_task_desc=owner.description if owner else None,
                 active_session_id=owner.session_id if owner else None,
                 acquired_at=owner.acquired_at if owner else None,
+                queued_count=sum(
+                    1 for item in queued
+                    if item.get("device_serial") == serial
+                    and item.get("adb_endpoint_id") in (None, scope)
+                ),
             )
             devices.append(status)
         return devices

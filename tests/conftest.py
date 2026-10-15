@@ -26,6 +26,15 @@ import pytest
 from artemis.drivers.mock.mock_driver import MockDeviceDriver
 
 
+@pytest.fixture(autouse=True)
+def isolate_execution_device_selection(tmp_path, monkeypatch):
+    """Tests must not consume or overwrite the user's shared device choice."""
+    monkeypatch.setattr(
+        "artemis.runtime.device_selection.get_temp_dir",
+        lambda name: tmp_path / name,
+    )
+
+
 @pytest.fixture
 def mock_driver():
     """Provide an isolated mock mobile driver."""

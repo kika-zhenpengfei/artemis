@@ -329,6 +329,37 @@ async def test_submission_probe_falls_back_to_unlocked_device(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("locked, summary", [(True, "Device Locked"), (None, "Lock State Unknown")])
+async def test_submission_probe_never_switches_away_from_explicit_device(monkeypatch, locked, summary):
+    probe = AdbDeviceProbe()
+    monkeypatch.setattr("artemis.core.diagnostics.probes.adb_probe.toolchain.resolve", lambda _: "adb")
+    monkeypatch.setattr(probe, "_get_device_states", AsyncMock(return_value=[("selected", "device"), ("other", "device")]))
+    lock_state = AsyncMock(side_effect=lambda _adb, serial, **_kwargs: locked if serial == "selected" else False)
+    monkeypatch.setattr(probe, "_get_confirmed_device_lock_state", lock_state)
+
+    result = await probe.probe_submission_readiness(target_serial="selected")
+
+    assert result.summary == summary
+    assert result.metadata["active_device"]["serial"] == "selected"
+    lock_state.assert_awaited_once_with("adb", "selected", timeout_seconds=1.0)
+
+
+@pytest.mark.asyncio
+async def test_submission_probe_does_not_probe_other_device_after_target_disconnects(monkeypatch):
+    probe = AdbDeviceProbe()
+    monkeypatch.setattr("artemis.core.diagnostics.probes.adb_probe.toolchain.resolve", lambda _: "adb")
+    monkeypatch.setattr(probe, "_get_device_states", AsyncMock(return_value=[("other", "device")]))
+    lock_state = AsyncMock(return_value=False)
+    monkeypatch.setattr(probe, "_get_confirmed_device_lock_state", lock_state)
+
+    result = await probe.probe_submission_readiness(target_serial="selected")
+
+    assert result.summary == "Lock State Unknown"
+    assert result.metadata["active_device"]["serial"] == "selected"
+    lock_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_adb_probe_prefers_unlocked_device_when_one_is_locked(monkeypatch):
     """When multiple ready devices exist, probe() should pick the unlocked one as active."""
     from artemis.core.diagnostics.schema import DeviceInfo

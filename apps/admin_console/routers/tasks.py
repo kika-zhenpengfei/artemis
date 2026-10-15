@@ -16,15 +16,21 @@ import asyncio
 from contextlib import suppress
 import json
 from typing import Any
+from uuid import UUID
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 from artemis.core.diagnostics import readiness_engine
 from artemis.runtime import DeviceExecutionLock, device_pool
+from artemis.runtime.device_selection import (
+    DeviceSelectionError, check_adb_endpoint, get_selected_serial, resolve_device_selection, save_selected_serial,
+)
 
 try:
     from admin_console.core.state import state
     from admin_console.database.repositories.session_repository import session_repo
-    from admin_console.schemas.task_schema import RunRequest
+    from admin_console.schemas.task_schema import RunRequest, TaskBatchRequest
+    from admin_console.services.task_batch_service import TaskBatchError, task_batch_service
     from admin_console.services.ipc_service import ipc_service
     from admin_console.services.model_service import model_service
     from admin_console.services.task_preset_catalog import task_recommendation_engine
@@ -32,7 +38,8 @@ try:
 except ImportError:
     from apps.admin_console.core.state import state
     from apps.admin_console.database.repositories.session_repository import session_repo
-    from apps.admin_console.schemas.task_schema import RunRequest
+    from apps.admin_console.schemas.task_schema import RunRequest, TaskBatchRequest
+    from apps.admin_console.services.task_batch_service import TaskBatchError, task_batch_service
     from apps.admin_console.services.ipc_service import ipc_service
     from apps.admin_console.services.model_service import model_service
     from apps.admin_console.services.task_preset_catalog import task_recommendation_engine
@@ -40,6 +47,11 @@ except ImportError:
 
 
 router = APIRouter(tags=["tasks"])
+
+
+class DeviceSelectionRequest(BaseModel):
+    serial: str | None
+    expected_adb_endpoint_id: str | None = None
 
 
 @router.get("/api/tasks/presets")
@@ -113,6 +125,16 @@ async def run_task(request: RunRequest):
                 "total_queued": len(state.queue_tasks),
             }
 
+    try:
+        endpoint = check_adb_endpoint(request.expected_adb_endpoint_id)
+        target_serial, require_idle = await resolve_device_selection(
+            request.device_serial, require_idle=request.require_idle,
+            expected_adb_endpoint_id=endpoint.identity,
+        )
+    except DeviceSelectionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    request = request.model_copy(update={"device_serial": target_serial, "require_idle": require_idle})
+
     # Reject an explicit unknown/offline target before running the more
     # expensive readiness probe. Besides producing a stable SDK response,
     # this avoids probing the currently active device for a serial that can
@@ -165,20 +187,50 @@ async def run_task(request: RunRequest):
         if verified_serial and not request.device_serial:
             target_serial = verified_serial
 
-    return await task_queue_service.enqueue_tasks(
-        incoming_goals,
-        profile=request.profile or "flash",
-        expected_output=request.expected_output,
-        enable_outputter=request.enable_outputter,
-        verification_level=request.verification_level,
-        explorer_mode=request.explorer_mode,
-        locked_app_package=request.locked_app_package,
-        app_path=request.app_path,
-        device_serial=target_serial,
-        ingress=request.ingress or "frontend",
-        session_id=request.session_id,
-        conversation_id=request.conversation_id,
-    )
+    try:
+        check_adb_endpoint(endpoint.identity)
+        return await task_queue_service.enqueue_tasks(
+            incoming_goals,
+            profile=request.profile or "flash",
+            expected_output=request.expected_output,
+            enable_outputter=request.enable_outputter,
+            verification_level=request.verification_level,
+            explorer_mode=request.explorer_mode,
+            locked_app_package=request.locked_app_package,
+            app_path=request.app_path,
+            device_serial=target_serial,
+            ingress=request.ingress or "frontend",
+            session_id=request.session_id,
+            conversation_id=request.conversation_id,
+            **({"require_idle": True} if request.require_idle else {}),
+            **({"expected_adb_endpoint_id": endpoint.identity} if request.require_idle or request.expected_adb_endpoint_id else {}),
+        )
+    except DeviceSelectionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.post("/api/task_batches")
+async def create_task_batch(request: TaskBatchRequest):
+    try:
+        return await task_batch_service.submit(request, run_task)
+    except TaskBatchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/api/task_batches")
+async def list_task_batches():
+    try:
+        return await asyncio.to_thread(task_batch_service.list)
+    except TaskBatchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
+@router.get("/api/task_batches/{batch_id}")
+async def get_task_batch(batch_id: UUID):
+    try:
+        return await asyncio.to_thread(task_batch_service.get, str(batch_id))
+    except TaskBatchError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
 
 @router.get("/api/run/defaults")
@@ -200,8 +252,33 @@ async def get_run_defaults():
 @router.get("/api/devices")
 async def list_devices():
     """List all connected Android devices with their busy / idle status."""
-    devices = await device_pool.list_devices_async()
-    return {"devices": [d.to_dict() for d in devices]}
+    endpoint = check_adb_endpoint()
+    devices = await device_pool.try_list_devices_async()
+    if devices is None:
+        raise HTTPException(status_code=503, detail="Could not list Android devices. Try again.")
+    try:
+        check_adb_endpoint(endpoint.identity)
+        selected_serial = get_selected_serial(endpoint)
+    except DeviceSelectionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {"devices": [d.to_dict() for d in devices], "selected_serial": selected_serial,
+            "adb_endpoint_id": endpoint.identity}
+
+
+@router.post("/api/devices/selection")
+async def select_execution_device(request: DeviceSelectionRequest):
+    try:
+        endpoint = check_adb_endpoint(request.expected_adb_endpoint_id)
+        serial = request.serial
+        if serial is not None:
+            serial, _ = await resolve_device_selection(
+                serial, require_idle=True, expected_adb_endpoint_id=endpoint.identity
+            )
+        check_adb_endpoint(endpoint.identity)
+        save_selected_serial(serial, endpoint)
+    except DeviceSelectionError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+    return {"selected_serial": serial}
 
 
 @router.post("/api/stop")

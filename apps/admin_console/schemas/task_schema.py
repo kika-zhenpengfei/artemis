@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pydantic import BaseModel
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class RunRequest(BaseModel):
@@ -29,9 +32,40 @@ class RunRequest(BaseModel):
     locked_app_package: str | None = None
     app_path: str | None = None
     device_serial: str | None = None
+    require_idle: bool = False
+    expected_adb_endpoint_id: str | None = None
     ingress: str | None = "frontend"
     session_id: str | None = None
     conversation_id: str | None = None
+
+
+class TaskBatchItemRequest(BaseModel):
+    goal: str = Field(min_length=1)
+    profile: Literal["flash", "pro"] = "flash"
+    device_serial: str = Field(min_length=1)
+
+    @field_validator("goal", "device_serial", mode="before")
+    @classmethod
+    def strip_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class TaskBatchRequest(BaseModel):
+    batch_id: UUID
+    expected_adb_endpoint_id: str = Field(min_length=1)
+    items: list[TaskBatchItemRequest] = Field(min_length=1)
+
+    @field_validator("expected_adb_endpoint_id", mode="before")
+    @classmethod
+    def strip_endpoint(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def unique_devices(self):
+        serials = [item.device_serial for item in self.items]
+        if len(serials) != len(set(serials)):
+            raise ValueError("Each task in a batch must select a different device")
+        return self
 
 
 class ReplayRequest(BaseModel):

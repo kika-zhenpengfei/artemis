@@ -52,6 +52,8 @@ from artemis.runtime import (
     request_cancel,
     trace_store,
 )
+from artemis.runtime.device_lock import DeviceBusyError
+from artemis.runtime.device_selection import DeviceSelectionError, check_adb_endpoint, resolve_device_selection
 
 logger = logging.getLogger(__name__)
 
@@ -1052,6 +1054,8 @@ class TaskQueueService:
         conversation_id: str | None = None,
         verification_level: str | None = None,
         explorer_mode: str | None = None,
+        require_idle: bool = False,
+        expected_adb_endpoint_id: str | None = None,
     ) -> dict[str, Any]:
         """Enqueues one or more goals and wakes up the background worker.
 
@@ -1067,7 +1071,7 @@ class TaskQueueService:
 
         enqueued_tasks = []
         now = time.time()
-        endpoint = current_adb_endpoint()
+        endpoint = check_adb_endpoint(expected_adb_endpoint_id)
 
         duplicate_response = cls._find_duplicate_submission(
             goals, session_id, device_serial, endpoint, now
@@ -1075,6 +1079,9 @@ class TaskQueueService:
         if duplicate_response is not None:
             return duplicate_response
 
+        device_serial, require_idle = await resolve_device_selection(
+            device_serial, require_idle=require_idle, expected_adb_endpoint_id=endpoint.identity
+        )
         rejection_response = await cls._reject_unavailable_device(device_serial)
         if rejection_response is not None:
             return rejection_response
@@ -1088,29 +1095,43 @@ class TaskQueueService:
                 device_serial = await device_pool.select_device_async()
             except Exception:
                 device_serial = None
-        for i, goal in enumerate(goals):
-            task_item = cls._create_queue_item(
-                goal,
-                i,
-                now,
-                endpoint,
-                single_session_id,
-                profile,
-                expected_output,
-                enable_outputter,
-                locked_app_package,
-                app_path,
-                device_serial,
-                ingress,
-                conversation_id,
-                verification_level=verification_level,
-                explorer_mode=explorer_mode,
+        check_adb_endpoint(endpoint.identity)
+        admission_lock = None
+        if require_idle:
+            admission_lock = DeviceExecutionLock(
+                device_serial, description="Reserve selected device", lock_scope=endpoint.identity
             )
-            state.queue_items.append(task_item)
-            enqueued_tasks.append(task_item)
-            cls._broadcast_startup_progress(
-                task_item["session_id"], "queued", "Task received and queued"
-            )
+            try:
+                admission_lock.acquire(blocking=False)
+            except DeviceBusyError as exc:
+                raise DeviceSelectionError(str(exc)) from exc
+        try:
+            for i, goal in enumerate(goals):
+                task_item = cls._create_queue_item(
+                    goal,
+                    i,
+                    now,
+                    endpoint,
+                    single_session_id,
+                    profile,
+                    expected_output,
+                    enable_outputter,
+                    locked_app_package,
+                    app_path,
+                    device_serial,
+                    ingress,
+                    conversation_id,
+                    verification_level=verification_level,
+                    explorer_mode=explorer_mode,
+                )
+                state.queue_items.append(task_item)
+                enqueued_tasks.append(task_item)
+                cls._broadcast_startup_progress(
+                    task_item["session_id"], "queued", "Task received and queued"
+                )
+        finally:
+            if admission_lock is not None:
+                admission_lock.release()
 
         # Wake worker immediately
         state.wake_event.set()
@@ -1210,12 +1231,48 @@ class TaskQueueService:
             state.current_process = None
 
     @classmethod
+    def _persist_pending_cancellation(cls, item: dict[str, Any]) -> None:
+        """Retain cancellation evidence when no worker has created a session yet."""
+        sid = str(item.get("session_id") or "")
+        if (
+            not sid
+            or item.get("status") not in {"pending", "queued"}
+            or sid in state.active_runs
+            or sid in state.active_connections
+        ):
+            return
+        try:
+            existing = trace_store.read_status(sid)
+            if existing:
+                if existing.get("status") not in {"completed", "success", "failed", "cancelled"}:
+                    trace_store.update_trace_status(
+                        sid, "cancelled", error="Task stopped before its worker started."
+                    )
+                return
+            now = time.time()
+            trace_store.write_status(sid, {
+                "trace_id": sid,
+                "task_desc": item.get("goal") or "",
+                "model": str(item.get("profile") or "flash").capitalize(),
+                "conversation_id": item.get("conversation_id"),
+                "device_serial": item.get("device_serial"),
+                "status": "cancelled",
+                "start_time": item.get("start_time") or item.get("created_at") or now,
+                "end_time": now,
+                "error": "Task stopped before its worker started.",
+                "result": None,
+            })
+        except OSError:
+            logger.exception("Could not persist pending task cancellation for %s", sid)
+
+    @classmethod
     def _stop_all_tasks(cls) -> bool:
         """Terminate all active device owners and clear pending queue submissions."""
         # 1. Cancel local queue reservations
         for item in state.queue_items:
             if isinstance(item, dict) and item.get("status") != "running":
                 DeviceExecutionLock.cancel_reservation(item.get("queue_ticket"))
+                cls._persist_pending_cancellation(item)
         state.clear_queue()
 
         # 2. Terminate all active owners across all devices
@@ -1536,6 +1593,8 @@ class TaskQueueService:
         )
         if stopped_item and not reservation_cancelled:
             DeviceExecutionLock.cancel_reservation(stopped_item.get("queue_ticket"))
+        if stopped_item:
+            cls._persist_pending_cancellation(stopped_item)
         state.queue_items = [
             item
             for item in state.queue_items

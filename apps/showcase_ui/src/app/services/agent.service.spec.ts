@@ -1,7 +1,80 @@
 import { signal, computed } from '@angular/core';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 
 import { AgentService } from './agent.service';
+
+describe('AgentService notes request ordering', () => {
+  let service: AgentService;
+  let requests: { url: string; response: Subject<any> }[];
+
+  beforeEach(() => {
+    service = Object.create(AgentService.prototype) as AgentService;
+    service.currentSessionId = signal<string | null>('task-a');
+    service.currentNotes = signal<Record<string, string>>({});
+    service.selectedNoteKey = signal('task_plan.md');
+    (service as any).sessionLoadGeneration = 0;
+    (service as any).notesRequestId = 0;
+    requests = [];
+    (service as any).http = {
+      get: (url: string) => {
+        const response = new Subject<any>();
+        requests.push({ url, response });
+        return response;
+      }
+    };
+  });
+
+  function select(sessionId: string | null): void {
+    service.currentSessionId.set(sessionId);
+    (service as any).sessionLoadGeneration++;
+    service.currentNotes.set({});
+  }
+
+  it('keeps the selected task notes when an earlier task responds late', () => {
+    service.fetchNotes('task-a');
+    select('task-b');
+    service.fetchNotes('task-b');
+    requests[1].response.next({ notes: { 'report.md': 'B result' } });
+    requests[0].response.next({ notes: { 'task_plan.md': 'A old plan' } });
+    expect(service.currentNotes()).toEqual({ 'report.md': 'B result' });
+    expect(service.selectedNoteKey()).toBe('report.md');
+  });
+
+  it('does not let an older refresh overwrite newer notes for the same task', () => {
+    service.fetchNotes('task-a');
+    service.fetchNotes('task-a');
+    requests[1].response.next({ notes: { 'task_plan.md': 'Latest plan' } });
+    requests[0].response.next({ notes: { 'task_plan.md': 'Earlier plan' } });
+    expect(service.currentNotes()).toEqual({ 'task_plan.md': 'Latest plan' });
+  });
+
+  it('ignores the first visit response after selecting A, B, then A again', () => {
+    service.fetchNotes('task-a');
+    select('task-b');
+    select('task-a');
+    service.fetchNotes('task-a');
+    requests[0].response.next({ notes: { 'task_plan.md': 'First visit' } });
+    expect(service.currentNotes()).toEqual({});
+    requests[1].response.next({ notes: { 'task_plan.md': 'Second visit' } });
+    expect(service.currentNotes()).toEqual({ 'task_plan.md': 'Second visit' });
+  });
+
+  it('does not repopulate notes after the selection is cleared', () => {
+    service.fetchNotes('task-a');
+    select(null);
+    service.fetchNotes('');
+    requests[0].response.next({ notes: { 'report.md': 'Deleted task' } });
+    expect(service.currentNotes()).toEqual({});
+  });
+
+  it('ignores a background task refresh without invalidating the current request', () => {
+    service.fetchNotes('task-a');
+    service.fetchNotes('background-task');
+    expect(requests.length).toBe(1);
+    requests[0].response.next({ notes: { 'report.md': 'Selected task' } });
+    expect(service.currentNotes()).toEqual({ 'report.md': 'Selected task' });
+  });
+});
 
 describe('AgentService live LLM retry timeline', () => {
   function createServiceWithoutPolling(): AgentService {
@@ -14,6 +87,12 @@ describe('AgentService live LLM retry timeline', () => {
     (service as any).sessionSnapshotRequestId = 0;
     (service as any).sessionSnapshotAppliedId = 0;
     (service as any).pendingSnapshotRequests = new Set<number>();
+    (service as any).deviceSelection = {
+      selectedSerial: signal<string | null>('selected-phone'),
+      adbEndpointId: signal('tcp:127.0.0.1:5037'),
+      canStart: signal(true),
+      refresh: jasmine.createSpy('refreshDevices')
+    };
     return service;
   }
 
@@ -178,6 +257,54 @@ describe('AgentService live LLM retry timeline', () => {
     service.runTask('test goal').subscribe();
 
     expect(selectSpy).toHaveBeenCalledWith('new-session', false);
+  });
+
+  it('binds task submission to the selected device and requires it to be idle', () => {
+    const service = createServiceWithoutPolling();
+    const post = jasmine.createSpy('post').and.returnValue(of({ tasks: [] }));
+    (service as any).http = { post };
+    service.userPinnedSessionId = signal<string | null>(null);
+
+    service.runTask('Open Settings', 'pro').subscribe();
+
+    expect(post).toHaveBeenCalledWith('/api/run', jasmine.objectContaining({
+      goal: 'Open Settings', profile: 'pro', device_serial: 'selected-phone', require_idle: true,
+      expected_adb_endpoint_id: 'tcp:127.0.0.1:5037'
+    }));
+  });
+
+  it('does not submit without a selected idle device', () => {
+    const service = createServiceWithoutPolling();
+    const post = jasmine.createSpy('post');
+    (service as any).http = { post };
+    const rejected = jasmine.createSpy('rejected');
+
+    (service as any).deviceSelection.selectedSerial.set(null);
+    service.runTask('Open Settings').subscribe({ error: rejected });
+    (service as any).deviceSelection.selectedSerial.set('busy-phone');
+    (service as any).deviceSelection.canStart.set(false);
+    service.runTask('Open Settings').subscribe({ error: rejected });
+
+    expect(post).not.toHaveBeenCalled();
+    expect(rejected).toHaveBeenCalledTimes(2);
+  });
+
+  it('reports a rejected device submission without treating it as a started task', () => {
+    const service = createServiceWithoutPolling();
+    (service as any).http = {
+      post: () => of({ status: 'rejected', error: 'Selected phone disconnected', tasks: [] })
+    };
+    service.userPinnedSessionId = signal<string | null>(null);
+    const started = jasmine.createSpy('started');
+    const rejected = jasmine.createSpy('rejected');
+    const selectSpy = spyOn(service, 'selectSession');
+
+    service.runTask('Open Settings').subscribe({ next: started, error: rejected });
+
+    expect(started).not.toHaveBeenCalled();
+    expect(selectSpy).not.toHaveBeenCalled();
+    expect(rejected).toHaveBeenCalledWith({ error: { detail: 'Selected phone disconnected' } });
+    expect((service as any).deviceSelection.refresh).toHaveBeenCalled();
   });
 
   it('keeps the paused state when the backend says there is nothing to resume', () => {

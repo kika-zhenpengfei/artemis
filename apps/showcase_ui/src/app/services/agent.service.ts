@@ -17,8 +17,9 @@
 import { Injectable, signal, inject, computed, DestroyRef, NgZone } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
+import { DeviceSelectionService } from './device-selection.service';
 
-import { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, SessionUsage, TestWorkflow, PreparedTestWorkflow } from '../core/models/session.model';
+import { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, SessionUsage, TestWorkflow } from '../core/models/session.model';
 import { ProTuningDefaults, ProTuningOptions } from '../core/models/pro-tuning.model';
 import { StepItemData, StepReplayFrame, LLMStreamResetEventData, StreamResetNotice, DEFAULT_STREAM_RESET_MESSAGE, PersistedCheckerStream, StreamSegment } from '../core/models/stream.model';
 import { extractStepReplayFrames } from '../utils/action-formatter.util';
@@ -26,6 +27,7 @@ import { persistedStreamToSegments } from '../utils/stream-aggregator.util';
 export type { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, StepItemData, StepReplayFrame, LLMStreamResetEventData, StreamResetNotice };
 
 const SESSION_CACHE_KEY = 'artemis.sessions.v1';
+const REPORT_NOTE_KEYS = ['test_report.md', 'test_plan.md'];
 
 export interface VideoSegment {
   url: string;
@@ -69,6 +71,7 @@ interface SessionVideoResponse {
 })
 export class AgentService {
   private http = inject(HttpClient);
+  private deviceSelection = inject(DeviceSelectionService);
   private zone = inject(NgZone);
   private activePauseCardKey: string | null = null;
 
@@ -200,7 +203,6 @@ export class AgentService {
   public currentSessionId = signal<string | null>(null);
   public sessionLogs = signal<any[]>([]); // Dynamic array of all raw events received
   public currentTestWorkflow = signal<TestWorkflow | null>(null);
-  public preparedTestWorkflows = signal<PreparedTestWorkflow[]>([]);
   public isSessionContentLoading = signal<boolean>(false);
   public agentStatus = signal<string>('idle'); // Status of the agent runner process
   public runningSessionId = signal<string | null>(null);
@@ -233,7 +235,8 @@ export class AgentService {
   // Notes and Tab States
   public currentNotes = signal<Record<string, string>>({});
   public selectedNoteKey = signal<string>('task_plan.md');
-  public activeTab = signal<'tasks' | 'notes'>('tasks');
+  public selectedReportKey = signal<string>('test_report.md');
+  public activeTab = signal<'tasks' | 'notes' | 'report'>('tasks');
 
   // Video Replay Floating Window States
   public isVideoWindowOpen = signal<boolean>(false);
@@ -364,6 +367,7 @@ export class AgentService {
   private eventSource: EventSource | null = null;
   private statusInterval: any = null;
   private sessionLoadGeneration = 0;
+  private notesRequestId = 0;
   private sessionSnapshotRequestId = 0;
   private sessionSnapshotAppliedId = 0;
   private pendingSnapshotRequests = new Set<number>();
@@ -425,13 +429,21 @@ export class AgentService {
     proTuning?: ProTuningOptions
   ): Observable<any> {
     return new Observable((obs) => {
+      const deviceSerial = this.deviceSelection.selectedSerial();
+      if (!deviceSerial || !this.deviceSelection.canStart()) {
+        obs.error({ error: { detail: 'Select an idle online device before starting a task.' } });
+        return;
+      }
       const submittedEvent: StartupProgressEvent = {
         stage: 'submitting',
         message: 'Submitting the task',
         timestamp: Date.now() / 1000
       };
       this.pendingStartupProgress.set([submittedEvent]);
-      const payload: any = { goal, profile };
+      const payload: any = {
+        goal, profile, device_serial: deviceSerial, require_idle: true,
+        expected_adb_endpoint_id: this.deviceSelection.adbEndpointId()
+      };
       if (expectedOutput && expectedOutput.trim()) {
         payload.expected_output = expectedOutput.trim();
       }
@@ -447,6 +459,12 @@ export class AgentService {
       this.clearUserPinnedSession();
       this.http.post<any>('/api/run', payload).subscribe({
         next: (res) => {
+          if (res?.status === 'rejected') {
+            this.pendingStartupProgress.set([]);
+            this.deviceSelection.refresh();
+            obs.error({ error: { detail: res.error || 'The selected device is unavailable.' } });
+            return;
+          }
           if (res && res.tasks && res.tasks.length > 0) {
             const newSessionId = res.tasks[0].session_id;
             if (newSessionId) {
@@ -474,6 +492,7 @@ export class AgentService {
         },
         error: (err) => {
           this.pendingStartupProgress.set([]);
+          this.deviceSelection.refresh();
           obs.error(err);
         }
       });
@@ -805,7 +824,8 @@ export class AgentService {
       'recording_ready',
       'recording_failed',
       'checker_event',
-      'verification_recorded'
+      'verification_recorded',
+      'test_execution_updated'
     ];
 
     eventTypes.forEach((eventType) => {
@@ -1097,7 +1117,7 @@ export class AgentService {
               }
             }
           }
-          if (eventType === 'verification_recorded' && parsedData?.session_id) {
+          if ((eventType === 'verification_recorded' || eventType === 'test_execution_updated') && parsedData?.session_id) {
             const verifiedSessionId = String(parsedData.session_id);
             if (this.currentSessionId() === verifiedSessionId) {
               this.fetchTestWorkflow(verifiedSessionId);
@@ -1757,16 +1777,29 @@ export class AgentService {
 
   public fetchNotes(sessionId: string): void {
     if (!sessionId) {
+      this.notesRequestId++;
       this.currentNotes.set({});
       return;
     }
+    if (this.currentSessionId() !== sessionId) {
+      return;
+    }
+    const loadGeneration = this.sessionLoadGeneration;
+    const requestId = ++this.notesRequestId;
     this.http.get<any>(`/api/sessions/${sessionId}/notes`).subscribe({
       next: (res) => {
+        if (
+          this.currentSessionId() !== sessionId
+          || this.sessionLoadGeneration !== loadGeneration
+          || this.notesRequestId !== requestId
+        ) {
+          return;
+        }
         if (res && res.notes) {
           this.currentNotes.set(res.notes);
           
           // Default to task_plan.md if available, otherwise first note
-          const keys = Object.keys(res.notes);
+          const keys = this.getNoteKeys();
           if (keys.length > 0) {
             const currentSelected = this.selectedNoteKey();
             if (!keys.includes(currentSelected)) {
@@ -1785,6 +1818,17 @@ export class AgentService {
     });
   }
 
+  public isReportNote(key: string): boolean {
+    return REPORT_NOTE_KEYS.includes(key);
+  }
+
+  public getNoteKeys(kind: 'notes' | 'report' = 'notes'): string[] {
+    const keys = Object.keys(this.currentNotes());
+    return kind === 'report'
+      ? REPORT_NOTE_KEYS.filter(key => keys.includes(key))
+      : keys.filter(key => key.toLowerCase().endsWith('.md') && !this.isReportNote(key));
+  }
+
   public fetchTestWorkflow(sessionId: string): void {
     this.http.get<TestWorkflow>(`/api/sessions/${encodeURIComponent(sessionId)}/test_workflow`).subscribe({
       next: (workflow) => {
@@ -1799,16 +1843,6 @@ export class AgentService {
         if (this.currentSessionId() === sessionId) {
           this.currentTestWorkflow.set(null);
         }
-      }
-    });
-  }
-
-  public fetchPreparedTestWorkflows(): void {
-    this.http.get<PreparedTestWorkflow[]>('/api/test_workflows/prepared').subscribe({
-      next: (workflows) => this.preparedTestWorkflows.set(workflows),
-      error: (err) => {
-        console.error('Failed to fetch prepared test workflows:', err);
-        this.preparedTestWorkflows.set([]);
       }
     });
   }

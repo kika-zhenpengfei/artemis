@@ -33,6 +33,7 @@ through ``ToolFailure`` or an explicit status.
 import ast
 import hashlib
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -190,6 +191,8 @@ class McpActionExecutor:
         hierarchy_ok: bool | None = None
         target_semantics: dict[str, Any] = {}
         target_coordinates: list[int] | None = None
+        action_ms = 0
+        observation_ms = 0
         with span:
             try:
                 session = await self._session_or_start()
@@ -216,18 +219,24 @@ class McpActionExecutor:
                     )
                     message = blocked_reason
                 elif extension:
+                    action_started = time.monotonic()
                     raw_result = await session.call_raw(wire_name, wire_args)
+                    action_ms = round((time.monotonic() - action_started) * 1000)
                     message = next(
                         (b.text for b in raw_result.content if getattr(b, "type", "") == "text"),
                         f"Extension tool '{raw_name}' completed.",
                     )
                     res = ActionResult.success(raw_name, message)
                 else:
+                    action_started = time.monotonic()
                     res = await session.call(wire_name, wire_args)
+                    action_ms = round((time.monotonic() - action_started) * 1000)
                     message = finalize(res) if finalize else res.message
 
                 if res.ok or self._observe_despite_failure(raw_name, res):
+                    observation_started = time.monotonic()
                     obs = await session.observe(settle_ms=400)
+                    observation_ms = round((time.monotonic() - observation_started) * 1000)
                     if obs.ok:
                         shot_path = obs.screenshot_path
                         xml_list = obs.elements_text
@@ -280,6 +289,7 @@ class McpActionExecutor:
                 "target_semantics": target_semantics,
                 "target_coordinates": target_coordinates,
                 "hierarchy_ok": hierarchy_ok,
+                "timings_ms": {"device_action": action_ms, "post_action_observe": observation_ms},
             },
         )
 

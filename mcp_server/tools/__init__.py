@@ -18,8 +18,11 @@ from mcp_server.tools.device_state import mobile_get_device_state
 from mcp_server.tools.device_execution import (
     mobile_act,
     mobile_observe,
+    mobile_prepare_case,
+    mobile_run_plan,
     mobile_session,
     mobile_verify,
+    mobile_webui_handoff,
 )
 from mcp_server.tools.diagnose import mobile_diagnose
 from mcp_server.tools.inspect_trace import mobile_inspect_trace
@@ -28,7 +31,9 @@ from mcp_server.tools.task_runner import mobile_run_task
 from mcp_server.tools.test_workflow import (
     mobile_test_cases,
     mobile_test_context,
+    mobile_test_execution_plan,
     mobile_test_report,
+    mobile_test_intakes,
 )
 
 __all__ = [
@@ -39,9 +44,14 @@ __all__ = [
     "mobile_diagnose",
     "mobile_session",
     "mobile_observe",
+    "mobile_prepare_case",
     "mobile_act",
+    "mobile_run_plan",
     "mobile_verify",
+    "mobile_webui_handoff",
     "mobile_test_context",
     "mobile_test_cases",
+    "mobile_test_execution_plan",
     "mobile_test_report",
+    "mobile_test_intakes",
 ]

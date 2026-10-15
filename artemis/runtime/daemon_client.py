@@ -223,6 +223,7 @@ def submit_task_to_daemon(
     explorer_mode: str | None = None,
     base_url: str | None = None,
     timeout: float = 15.0,
+    require_idle: bool = False,
 ) -> dict[str, Any] | None:
     """Submit a task to the running Daemon via REST API.
 
@@ -247,6 +248,8 @@ def submit_task_to_daemon(
         "ingress": ingress,
         "conversation_id": conversation_id,
     }
+    if require_idle:
+        payload["require_idle"] = True
 
     try:
         data = json.dumps(payload).encode("utf-8")
@@ -259,6 +262,15 @@ def submit_task_to_daemon(
         with urllib.request.urlopen(req, timeout=timeout) as response:
             if response.status in (200, 201):
                 return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        if exc.code in (409, 503):
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("detail", str(exc))
+            except (ValueError, UnicodeDecodeError):
+                detail = str(exc)
+            return {"status": "rejected", "error": detail}
+        logger.debug(f"Failed to submit task to Daemon at {url}: {exc}")
+        return None
     except Exception as exc:
         logger.debug(f"Failed to submit task to Daemon at {url}: {exc}")
         return None

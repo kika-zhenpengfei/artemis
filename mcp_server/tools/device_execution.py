@@ -18,8 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 from typing import Any
+import urllib.error
+import urllib.parse
+import urllib.request
 import webbrowser
 
 from mcp.types import CallToolResult, ImageContent, TextContent
@@ -172,9 +176,21 @@ async def close_device_execution_sessions() -> None:
 
 
 def _result(payload: dict[str, Any], image_bytes: bytes | None = None) -> CallToolResult:
-    content: list[Any] = [
-        TextContent(type="text", text=str(payload.get("message") or payload.get("status") or "OK"))
-    ]
+    message = str(payload.get("message") or payload.get("status") or "OK")
+    reason = payload.get("reason")
+    if reason:
+        message += f"\nReason: {reason}"
+    if payload.get("wait_status"):
+        message += f"\nScreen wait: {payload['wait_status']} after {payload['poll_count']} captures."
+        if payload["wait_status"] == "timeout":
+            message += " Change strategy or record the blocked precondition."
+    observation = payload.get("observation")
+    guidance = payload.get("scenario_guidance")
+    if not guidance and isinstance(observation, dict):
+        guidance = observation.get("scenario_guidance")
+    if isinstance(guidance, dict) and guidance.get("prompt"):
+        message += f"\n{guidance['prompt']}"
+    content: list[Any] = [TextContent(type="text", text=message)]
     if image_bytes:
         mime_type = "image/png" if image_bytes.startswith(b"\x89PNG") else "image/jpeg"
         content.append(
@@ -198,14 +214,23 @@ async def mobile_session(
     lock_timeout_seconds: float = 30.0,
     idle_timeout_seconds: float = 900.0,
     workflow_id: str | None = None,
+    require_idle: bool = False,
+    wait_timeout_seconds: float = 25.0,
 ) -> dict[str, Any]:
     """Open, inspect, or close an external-agent-driven device session.
 
     Operations:
-      - `open`: requires `goal` unless `workflow_id` names a prepared test plan;
-        optionally pass `device_serial`. With several
-        ready devices, first ask the user to choose a serial. Returns a
-        `session_id`; then call `mobile_observe`.
+      - `open` with `workflow_id`: waits for the user to select an idle device
+        and confirm this workflow in WebUI Test Plans or Task Queue. It leases
+        no device before confirmation. Each call waits up to
+        `wait_timeout_seconds` (default 25, maximum 30). On `awaiting_device`,
+        keep the Codex task active and call open again with the same workflow;
+        only `status='running'` permits device actions. The per-workflow choice
+        is authoritative; an explicit `device_serial` must match it.
+      - `open` without a workflow requires `goal`. An explicit `device_serial`
+        takes precedence over the saved global WebUI choice. An unavailable
+        saved choice is rejected. With several ready devices and no selection,
+        ask the user to choose. `require_idle` rejects a busy explicit target.
       - `status`: pass `session_id` for one session or omit it to list sessions.
       - `close`: pass `session_id`, terminal `status` (`completed`, `failed`, or
         `cancelled`) and an optional summary. Always close the session when done
@@ -219,14 +244,31 @@ async def mobile_session(
     normalized = operation.strip().lower()
     if normalized == "open":
         web_ui = await _ensure_web_ui_started()
-        result = await _manager.open(
-            goal=goal or "",
-            device_serial=device_serial,
-            session_id=session_id,
-            lock_timeout_seconds=lock_timeout_seconds,
-            idle_timeout_seconds=idle_timeout_seconds,
-            workflow_id=workflow_id,
-        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + min(30.0, max(0.0, wait_timeout_seconds))
+        while True:
+            result = await _manager.open(
+                goal=goal or "",
+                device_serial=device_serial,
+                session_id=session_id,
+                lock_timeout_seconds=lock_timeout_seconds,
+                idle_timeout_seconds=idle_timeout_seconds,
+                workflow_id=workflow_id,
+                require_idle=require_idle,
+            )
+            if not workflow_id or result.get("status") != "awaiting_device":
+                break
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(1.0, remaining))
+        if result.get("status") == "awaiting_device":
+            result["next"] = (
+                "Wait for the user to select an idle device and confirm this workflow "
+                "in WebUI Test Plans or Task Queue. Keep this Codex task active and "
+                "call mobile_session(operation='open', workflow_id=...) again. "
+                "Begin device actions only after status='running'."
+            )
         result["web_ui"] = web_ui
         return result
     if normalized == "status":
@@ -239,18 +281,130 @@ async def mobile_session(
 
 
 @mcp.tool()
+async def mobile_prepare_case(session_id: str, case_id: str) -> dict[str, Any]:
+    """Prepare a case's declared black-box device state before acting.
+
+    Runs under the leased device lock. A case may declare an Android package,
+    data reset or verified APK reinstall, temporary system settings,
+    system-setting checks, and a device-time window.
+    Returns `ready` or `blocked` with evidence. Preparation invalidates the
+    previous observation, so call `mobile_observe` afterwards. A blocked case
+    cannot run a fixed plan until its precondition is resolved and preparation
+    is repeated.
+    """
+    return await _manager.prepare_case(session_id, case_id=case_id)
+
+
+def _webui_handoff_request(workflow_id: str, operation: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    suffix = "run_status" if operation == "status" else "control"
+    encoded_id = urllib.parse.quote(workflow_id, safe="")
+    url = f"http://{_WEB_UI_HOST}:{_web_ui_port()}/api/test_workflows/{encoded_id}/{suffix}"
+    data = None if operation == "status" else json.dumps({"operation": operation, **arguments}).encode()
+    request = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json", "User-Agent": "Artemis-MCP-Handoff"},
+        method="GET" if operation == "status" else "POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=65) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.load(exc).get("detail", str(exc))
+        except (OSError, ValueError):
+            detail = str(exc)
+        raise ValueError(f"WebUI handoff failed: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Could not reach the ARTEMIS WebUI handoff: {exc.reason}") from exc
+
+
+@mcp.tool()
+async def mobile_webui_handoff(
+    workflow_id: str,
+    operation: str,
+    action: str | None = None,
+    arguments: dict[str, Any] | None = None,
+    observation_id: str | None = None,
+    case_id: str | None = None,
+    checkpoint_id: str | None = None,
+    assertion: str | None = None,
+    status: str | None = None,
+    evidence: str | None = None,
+    resume_token: str | None = None,
+    settle_ms: int = 0,
+    wait_for_change: bool = False,
+    timeout_ms: int = 15000,
+    poll_interval_ms: int = 1000,
+    include_image: bool = True,
+) -> CallToolResult:
+    """Let Codex resolve a paused WebUI test on its existing device lease.
+
+    Use `status` to read the handoff and active `case_id`, then `observe`,
+    `act` with the latest observation ID, and `verify` for a Pro checkpoint.
+    Call `resume` with the handoff's `resume_token` to continue fixed steps;
+    poll `status` until the next handoff or final report. `close` releases the
+    WebUI-owned device lease if the workflow cannot continue. No separate
+    ARTEMIS LLM key is needed because Codex makes the dynamic decisions.
+    """
+    normalized = operation.strip().lower()
+    if normalized not in {"status", "observe", "act", "verify", "resume", "close"}:
+        raise ValueError("operation must be status, observe, act, verify, resume, or close")
+    if not await asyncio.to_thread(is_artemis_daemon, _WEB_UI_HOST, _web_ui_port()):
+        raise RuntimeError("ARTEMIS WebUI is not running on the configured local port")
+    payload = await asyncio.to_thread(
+        _webui_handoff_request,
+        workflow_id,
+        normalized,
+        {
+            "action": action,
+            "arguments": arguments,
+            "observation_id": observation_id,
+            "case_id": case_id,
+            "checkpoint_id": checkpoint_id,
+            "assertion": assertion,
+            "status": status,
+            "evidence": evidence,
+            "resume_token": resume_token,
+            "settle_ms": settle_ms,
+            "wait_for_change": wait_for_change,
+            "timeout_ms": timeout_ms,
+            "poll_interval_ms": poll_interval_ms,
+        },
+    )
+    encoded_image = payload.pop("image_base64", None)
+    image_bytes = base64.b64decode(encoded_image) if encoded_image and include_image else None
+    return _result(payload, image_bytes)
+
+
+@mcp.tool()
 async def mobile_observe(
     session_id: str,
     settle_ms: int = 400,
     include_image: bool = True,
+    wait_for_change: bool = False,
+    timeout_ms: int = 15000,
+    poll_interval_ms: int = 1000,
 ) -> CallToolResult:
     """Observe the device and persist an observation step for the WebUI.
 
     Returns a screenshot, indexed `elements_text`, and an `observation_id`.
     Element indices are dynamic locators for the next `mobile_act` call. Always
     observe before the first screen-targeted action and after any uncertainty.
+    `mobile_act` already returns the post-action observation; do not immediately
+    observe again. For a known text condition, use `mobile_act(wait_for_text)`.
+    For an image-only dynamic screen, `wait_for_change=True` polls within one
+    call until a meaningful visual/UI change or `timeout_ms` (max 30000).
+    It requires a prior observation and records only the final poll as a step.
+    On timeout, choose a different strategy or record the blocker instead of
+    repeating the same wait. `include_image=False` only omits the returned image.
     """
-    payload, image_bytes = await _manager.observe(session_id, settle_ms=settle_ms)
+    payload, image_bytes = await _manager.observe(
+        session_id,
+        settle_ms=settle_ms,
+        wait_for_change=wait_for_change,
+        timeout_ms=timeout_ms,
+        poll_interval_ms=poll_interval_ms,
+    )
     return _result(payload, image_bytes if include_image else None)
 
 
@@ -286,6 +440,27 @@ async def mobile_act(
         arguments=arguments,
         observation_id=observation_id,
         case_id=case_id,
+    )
+    return _result(payload, image_bytes if include_image else None)
+
+
+@mcp.tool()
+async def mobile_run_plan(
+    session_id: str,
+    case_id: str,
+    resume_token: str | None = None,
+    include_image: bool = True,
+) -> CallToolResult:
+    """Run a compiled case's fixed steps until completion or a model handoff.
+
+    A handoff includes its current screenshot/UI, reason, expected return state,
+    and `resume_token`. Resolve the dynamic screen with `mobile_act`, then call
+    this tool again with that token. Close the device session after all cases.
+    Long fixed paths return `status="continued"` after at most five actions or
+    about 20 seconds; call again without a token to execute the next segment.
+    """
+    payload, image_bytes = await _manager.run_plan(
+        session_id, case_id=case_id, resume_token=resume_token
     )
     return _result(payload, image_bytes if include_image else None)
 

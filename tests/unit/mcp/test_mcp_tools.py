@@ -32,12 +32,17 @@ from mcp_server.tools import (
     mobile_inspect_trace,
     mobile_manage_task,
     mobile_observe,
+    mobile_prepare_case,
+    mobile_run_plan,
     mobile_run_task,
     mobile_session,
     mobile_test_cases,
     mobile_test_context,
+    mobile_test_execution_plan,
     mobile_test_report,
+    mobile_test_intakes,
     mobile_verify,
+    mobile_webui_handoff,
 )
 from artemis.runtime import trace_store
 
@@ -61,6 +66,7 @@ def test_tool_signatures():
     sig_observe = inspect.signature(mobile_observe)
     assert "session_id" in sig_observe.parameters
     assert "settle_ms" in sig_observe.parameters
+    assert "wait_for_change" in sig_observe.parameters
 
     sig_act = inspect.signature(mobile_act)
     assert "action" in sig_act.parameters
@@ -75,8 +81,14 @@ def test_tool_signatures():
     assert "checkpoint_id" in sig_verify.parameters
 
     assert "repository_root" in inspect.signature(mobile_test_context).parameters
+    assert "intake_id" in inspect.signature(mobile_test_context).parameters
+    assert "intake_id" in inspect.signature(mobile_test_intakes).parameters
     assert "profile" in inspect.signature(mobile_test_cases).parameters
     assert "workflow_id" in inspect.signature(mobile_test_report).parameters
+    assert "plans" in inspect.signature(mobile_test_execution_plan).parameters
+    assert "resume_token" in inspect.signature(mobile_run_plan).parameters
+    assert "case_id" in inspect.signature(mobile_prepare_case).parameters
+    assert "resume_token" in inspect.signature(mobile_webui_handoff).parameters
 
     # mobile_run_task signature check
     sig_run = inspect.signature(mobile_run_task)
@@ -115,6 +127,49 @@ def test_tool_signatures():
     assert "step_range" in sig_inspect.parameters
     assert sig_inspect.parameters["max_results"].default == 5
     assert "'search'" in (mobile_inspect_trace.__doc__ or "")
+
+
+@pytest.mark.asyncio
+async def test_webui_handoff_tool_forwards_image_and_control(monkeypatch):
+    monkeypatch.setattr(device_execution_tools, "is_artemis_daemon", lambda *_args: True)
+    calls = []
+
+    def fake_request(workflow_id, operation, arguments):
+        calls.append((workflow_id, operation, arguments))
+        return {"status": "handoff", "image_base64": "aW1hZ2U="}
+
+    monkeypatch.setattr(device_execution_tools, "_webui_handoff_request", fake_request)
+    result = await mobile_webui_handoff("workflow-1", "observe")
+    assert calls[0][:2] == ("workflow-1", "observe")
+    assert result.structuredContent["status"] == "handoff"
+    assert "image_base64" not in result.structuredContent
+    assert result.content[1].data == "aW1hZ2U="
+
+
+def test_executor_handoff_exposes_scenario_prompt_in_mcp_text():
+    result = device_execution_tools._result(
+        {
+            "status": "handoff",
+            "reason": "处理全屏广告",
+            "observation": {
+                "scenario_guidance": {
+                    "prompt": "插屏或激励视频广告：仅在适用时等待并处理可见的关闭入口。"
+                }
+            },
+        }
+    )
+
+    assert "处理全屏广告" in result.content[0].text
+    assert "插屏或激励视频广告" in result.content[0].text
+
+
+def test_executor_screen_wait_timeout_is_visible_in_mcp_text():
+    result = device_execution_tools._result(
+        {"message": "Screen observed.", "wait_status": "timeout", "poll_count": 3}
+    )
+
+    assert "timeout after 3 captures" in result.content[0].text
+    assert "Change strategy" in result.content[0].text
 
 
 @pytest.mark.asyncio
@@ -194,6 +249,36 @@ async def test_mobile_session_open_includes_web_ui_status(monkeypatch):
 
     manager.open.assert_awaited_once()
     assert result["web_ui"] == web_ui
+
+
+@pytest.mark.asyncio
+async def test_workflow_session_waits_until_webui_confirmation(monkeypatch):
+    manager = MagicMock()
+    manager.open = AsyncMock(side_effect=[
+        {"workflow_id": "workflow-1", "status": "awaiting_device"},
+        {"workflow_id": "workflow-1", "session_id": "workflow-1", "status": "running"},
+    ])
+    monkeypatch.setattr(device_execution_tools, "_manager", manager)
+    monkeypatch.setattr(device_execution_tools, "_ensure_web_ui_started", AsyncMock(return_value={}))
+    with patch.object(device_execution_tools.asyncio, "sleep", AsyncMock()) as wait:
+        result = await mobile_session(operation="open", workflow_id="workflow-1")
+    assert result["status"] == "running"
+    assert manager.open.await_count == 2
+    wait.assert_awaited_once()
+    assert all(call.kwargs["workflow_id"] == "workflow-1" for call in manager.open.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_workflow_session_timeout_is_waiting_not_a_lease(monkeypatch):
+    manager = MagicMock()
+    manager.open = AsyncMock(return_value={"workflow_id": "workflow-1", "status": "awaiting_device"})
+    monkeypatch.setattr(device_execution_tools, "_manager", manager)
+    monkeypatch.setattr(device_execution_tools, "_ensure_web_ui_started", AsyncMock(return_value={}))
+    result = await mobile_session(operation="open", workflow_id="workflow-1", wait_timeout_seconds=0)
+    assert result["status"] == "awaiting_device"
+    assert "session_id" not in result
+    assert "Keep this Codex task active" in result["next"]
+    manager.open.assert_awaited_once()
 
 
 def test_mobile_run_task_invalid_model():

@@ -134,9 +134,9 @@ limitations under the License.
               <!-- Send Button -->
               <button type="button" class="dock-circle-btn btn-send"
                 [class.has-content]="!!taskInput.trim()"
-                [disabled]="!taskInput.trim() || isSubmitting()"
+                [disabled]="!taskInput.trim() || isSubmitting() || !deviceSelection.canStart()"
                 (click)="submitTask()"
-                [title]="isSubmitting() ? 'Starting task...' : 'Start task (Enter)'"
+                [title]="!deviceSelection.canStart() ? 'Select an idle online device first' : isSubmitting() ? 'Starting task...' : 'Start task (Enter)'"
                 aria-label="Start task"
                 >
                 @if (isSubmitting()) {

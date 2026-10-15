@@ -35,6 +35,14 @@ limitations under the License.
         <span class="material-symbols-outlined tab-icon">description</span>
         <span class="tab-text">Notes & Plans</span>
       </button>
+      <button
+        class="tab-selector-btn"
+        [class.active]="agentService.activeTab() === 'report'"
+        (click)="agentService.activeTab.set('report')"
+        >
+        <span class="material-symbols-outlined tab-icon">summarize</span>
+        <span class="tab-text">Report</span>
+      </button>
     </div>
 
     <div class="header-right">
@@ -52,10 +60,13 @@ limitations under the License.
     </div>
   </header>
 
+  <app-device-selector [disabled]="isSubmitting()" />
+
   <!-- Scrollable Messages/Content Area -->
   <main class="chat-messages">
     <!-- Tasks Tab Content -->
     @if (agentService.activeTab() === 'tasks') {
+      <app-workflow-device-queue />
       <!-- Active Queue Section -->
       <div class="queue-section-header">
         <span class="material-symbols-outlined section-icon">bolt</span> Active Queue ({{ activeQueue().length }})
@@ -187,9 +198,12 @@ limitations under the License.
       </details>
     }
 
-    <!-- Notes Tab Content -->
-    @if (agentService.activeTab() === 'notes') {
+    <!-- Notes and Report Tab Content -->
+    @if (agentService.activeTab() === 'notes' || agentService.activeTab() === 'report') {
       <div class="notes-tab-content">
+        @if (agentService.activeTab() === 'notes') {
+          <app-test-workflow-panel />
+        }
         <!-- Notes Selector / Pills (Only shown if there are multiple markdown notes) -->
         @if (noteKeys().length > 1) {
           <div class="notes-selector-container">
@@ -197,7 +211,7 @@ limitations under the License.
               @for (key of noteKeys(); track trackNoteKey($index, key)) {
                 <button
                   class="note-selector-pill"
-                  [class.active]="agentService.selectedNoteKey() === key"
+                  [class.active]="selectedDocumentKey() === key"
                   (click)="selectNote(key)"
                   >
                   <span class="material-symbols-outlined pill-icon">draft</span>
@@ -207,13 +221,18 @@ limitations under the License.
             </div>
           </div>
         }
-        @if (noteKeys().length === 0) {
+        @if (noteKeys().length === 0 && (agentService.activeTab() === 'report' || !agentService.currentTestWorkflow())) {
           <div class="empty-notes-container">
             <div class="empty-notes-icon">
               <span class="material-symbols-outlined">description</span>
             </div>
-            <h4 class="empty-notes-title">No Notes & Plans</h4>
-            <p class="empty-notes-subtitle">No notes or structured plans were recorded for this session.</p>
+            @if (agentService.activeTab() === 'report') {
+              <h4 class="empty-notes-title">No Report Yet</h4>
+              <p class="empty-notes-subtitle">Test plans and reports will appear here when available for this session.</p>
+            } @else {
+              <h4 class="empty-notes-title">No Notes & Plans</h4>
+              <p class="empty-notes-subtitle">No notes or structured plans were recorded for this session.</p>
+            }
           </div>
         }
         <!-- Notes Content Viewer (Clean card blocks matching the second screenshot style) -->
@@ -377,4 +396,3 @@ limitations under the License.
     }
   </main>
 </div>
-

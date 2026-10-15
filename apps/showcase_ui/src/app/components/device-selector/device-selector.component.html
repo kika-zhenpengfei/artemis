@@ -1,0 +1,35 @@
+<section class="device-selector" aria-label="Device selection">
+  <div class="device-selector-heading">
+    <span class="device-selector-title">Default device</span>
+    <button type="button" class="refresh-button" aria-label="Refresh devices"
+      [disabled]="disabled() || deviceSelection.isLoading()"
+      (click)="deviceSelection.refresh()">Refresh</button>
+  </div>
+  <select aria-label="Target device" [ngModel]="deviceSelection.selectedSerial() || ''"
+    [disabled]="disabled() || deviceSelection.isLoading() || !deviceSelection.adbEndpointId()"
+    (ngModelChange)="selectDevice($event)">
+    <option value="">Select a device</option>
+    @if (deviceSelection.selectedSerial() && !deviceSelection.selectedDevice()) {
+      <option [value]="deviceSelection.selectedSerial()" disabled>
+        {{ deviceSelection.selectedSerial() }} · Disconnected
+      </option>
+    }
+    @for (device of deviceSelection.devices(); track device.serial) {
+      <option [value]="device.serial"
+        [disabled]="device.state !== 'device' || device.is_busy || device.queued_count > 0">
+        {{ deviceLabel(device) }}
+      </option>
+    }
+  </select>
+  <p class="device-hint">Workflow tests use the device confirmed on their own card.</p>
+  @if (hint()) {
+    <p class="device-hint" role="status"
+      [class.device-warning]="deviceSelection.error() || (deviceSelection.selectedSerial() && !deviceSelection.canStart())">
+      {{ hint() }}
+    </p>
+  }
+  @if (deviceSelection.selectionNeedsRetry()) {
+    <button type="button" class="retry-button" [disabled]="!canRetrySelection()"
+      (click)="retrySelection()">Retry selection</button>
+  }
+</section>

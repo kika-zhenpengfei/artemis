@@ -1,0 +1,88 @@
+:host {
+  display: block;
+  min-width: 0;
+}
+
+.device-selector {
+  padding: 12px 14px;
+  border: 1px solid rgba(203, 213, 225, .65);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .72);
+  box-shadow: 0 3px 12px rgba(30, 41, 59, .04);
+  backdrop-filter: blur(12px);
+}
+
+.device-selector-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.device-selector-title {
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.refresh-button {
+  border: 0;
+  padding: 2px 0;
+  background: transparent;
+  color: #2563eb;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.retry-button {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #2563eb;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+select {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .85);
+  color: #334155;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+select:focus-visible,
+.refresh-button:focus-visible,
+.retry-button:focus-visible {
+  outline: 2px solid #93c5fd;
+  outline-offset: 2px;
+}
+
+select:disabled,
+.refresh-button:disabled,
+.retry-button:disabled {
+  opacity: .6;
+  cursor: default;
+}
+
+.device-hint {
+  margin: 8px 0 0;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.device-warning {
+  color: #92400e;
+}

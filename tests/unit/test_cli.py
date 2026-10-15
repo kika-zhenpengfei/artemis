@@ -50,6 +50,45 @@ def test_cli_run_help():
     assert "--explorer-pro-mode" in result.output
 
 
+def test_cli_does_not_fall_back_after_device_rejection(monkeypatch):
+    import importlib
+    from unittest.mock import AsyncMock
+    import artemis.runtime as runtime
+
+    run_module = importlib.import_module("artemis.interfaces.cli.commands.run")
+    execute = AsyncMock()
+    monkeypatch.delenv("ARTEMIS_TASK_WORKER", raising=False)
+    monkeypatch.delenv("ARTEMIS_DEVICE_QUEUE_TICKET", raising=False)
+    monkeypatch.delenv("ARTEMIS_STANDALONE", raising=False)
+    monkeypatch.setattr(run_module, "execute_task", execute)
+    monkeypatch.setattr(runtime, "ensure_daemon_running", lambda **_: (True, "http://localhost:8000"))
+    monkeypatch.setattr(runtime, "submit_task_to_daemon", lambda **_: {"status": "rejected", "error": "phone-a is busy"})
+    result = runner.invoke(app, ["run", "Check display"])
+    assert result.exit_code == 1
+    assert "phone-a is busy" in result.output
+    execute.assert_not_awaited()
+
+
+def test_cli_standalone_binds_saved_device_before_local_execution(monkeypatch):
+    import importlib
+    from unittest.mock import AsyncMock
+    from artemis.runtime import device_selection as selection
+    from artemis.runtime.device_pool import DeviceStatus
+
+    run_module = importlib.import_module("artemis.interfaces.cli.commands.run")
+    monkeypatch.delenv("ARTEMIS_TASK_WORKER", raising=False)
+    monkeypatch.delenv("ARTEMIS_DEVICE_QUEUE_TICKET", raising=False)
+    selection.save_selected_serial("phone-a")
+    monkeypatch.setattr(selection.device_pool, "try_list_devices", lambda: [DeviceStatus("phone-a", "device"), DeviceStatus("phone-b", "device")])
+    execute = AsyncMock()
+    monkeypatch.setattr(run_module, "execute_task", execute)
+    monkeypatch.setattr(run_module, "which", lambda _: None)
+    monkeypatch.setattr(run_module, "display_device_status", lambda *_args, **_kwargs: None)
+    result = runner.invoke(app, ["run", "--standalone", "Check display"])
+    assert result.exit_code == 0, result.output
+    assert execute.call_args.kwargs["device_serial"] == "phone-a"
+
+
 def test_cli_batch_help():
     """Verify 'artemis batch --help' displays batch options."""
     result = runner.invoke(app, ["batch", "--help"])

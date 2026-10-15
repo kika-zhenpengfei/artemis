@@ -31,6 +31,7 @@ from artemis.runtime.adb_endpoint import AdbEndpoint
 @pytest.fixture(autouse=True)
 def clean_state(tmp_path, monkeypatch):
     """Reset global state between tests."""
+    monkeypatch.setattr("artemis.runtime.trace_store.TRACES_DIR", str(tmp_path / "traces"))
     isolated_pause_file = tmp_path / ".artemis_paused"
     # Redirect DeviceExecutionLock's lock/queue directory into tmp_path so that
     # enqueue reservations never touch the real %TEMP%/artemis/device-locks dir
@@ -109,6 +110,10 @@ async def test_enqueued_task_keeps_its_adb_endpoint_snapshot():
         patch.object(TaskQueueService, "ensure_worker_running"),
         patch(
             "apps.admin_console.services.task_queue_service.current_adb_endpoint",
+            return_value=original,
+        ),
+        patch(
+            "artemis.runtime.device_selection.current_adb_endpoint",
             return_value=original,
         ),
         patch(

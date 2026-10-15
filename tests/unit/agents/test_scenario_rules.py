@@ -24,9 +24,10 @@ from artemis.runtime import trace_store
 
 def test_guidance_offers_scenes_for_the_agent_to_select():
     ad = scenario_guidance("Open the app", "跳过  广告")
-    assert ad["rule_ids"] == ["开屏广告", "键盘推荐词"]
+    assert ad["rule_ids"] == ["开屏广告", "插屏或激励视频广告", "键盘推荐词"]
     assert "只执行适用的处理" in ad["prompt"]
     assert "跳过" in ad["prompt"]
+    assert "全屏广告" in ad["prompt"]
 
     keyboard = scenario_guidance("测试键盘推荐词", "")
     assert keyboard["rule_ids"] == ad["rule_ids"]
@@ -133,8 +134,8 @@ def test_scenario_rule_ids_are_recorded_in_test_report(tmp_path, monkeypatch):
     store.record_scenario_rules(workflow_id, ["开屏广告", "键盘推荐词"])
     report = store.report(workflow_id)
 
-    assert report["scenario_rule_ids"] == ["开屏广告", "键盘推荐词"]
-    assert "Candidate scenario rules: 开屏广告, 键盘推荐词" in (
+    assert report["scenario_rule_ids"] == ["开屏广告", "插屏或激励视频广告", "键盘推荐词"]
+    assert "Candidate scenario rules: 开屏广告, 插屏或激励视频广告, 键盘推荐词" in (
         tmp_path / "traces" / workflow_id / "notes" / "test_report.md"
     ).read_text(encoding="utf-8")
 

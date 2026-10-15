@@ -1,0 +1,67 @@
+@if (workflowDevices.workflows().length || workflowDevices.error()) {
+  <section class="workflow-device-queue" aria-label="Workflow device confirmation">
+    <div class="queue-heading">
+      <h3>Waiting for device</h3>
+      <button type="button" class="text-button" (click)="refresh()"
+        [disabled]="workflowDevices.isLoading() || deviceSelection.isLoading()">Refresh</button>
+    </div>
+    @if (workflowDevices.error()) {
+      <p class="warning" role="status">{{ workflowDevices.error() }}</p>
+    }
+    @for (workflow of workflowDevices.workflows(); track workflow.workflow_id) {
+      <article class="workflow-card" [attr.aria-label]="workflow.goal">
+        <div class="workflow-heading">
+          <span class="profile">{{ workflow.profile | uppercase }} · {{ workflow.case_count }} {{ workflow.case_count === 1 ? 'case' : 'cases' }}</span>
+          <span class="workflow-state">{{ workflow.status === 'starting' ? 'Starting' : workflow.status === 'confirmed' ? 'Confirmed' : 'Awaiting device' }}</span>
+        </div>
+        <p class="goal">{{ workflow.goal }}</p>
+        <span class="workflow-id">{{ workflow.workflow_id }}</span>
+
+        @if (workflowDevices.isEditing(workflow)) {
+          <label class="device-field">
+            <span>Device for this workflow</span>
+            <select [ngModel]="workflowDevices.choice(workflow).serial"
+              (ngModelChange)="workflowDevices.chooseDevice(workflow.workflow_id, $event)"
+              [attr.aria-label]="'Device for ' + workflow.goal"
+              [disabled]="workflowDevices.isConfirming(workflow.workflow_id) || deviceSelection.isLoading() || !deviceSelection.adbEndpointId()">
+              <option value="">Choose an idle device</option>
+              @if (workflowDevices.choice(workflow).serial && !hasDevice(workflowDevices.choice(workflow).serial)) {
+                <option [value]="workflowDevices.choice(workflow).serial" disabled>{{ workflowDevices.choice(workflow).serial }} · Disconnected</option>
+              }
+              @for (device of deviceSelection.devices(); track device.serial) {
+                <option [value]="device.serial" [disabled]="deviceDisabled(device)">{{ deviceLabel(device) }}</option>
+              }
+            </select>
+          </label>
+          @if (workflowDevices.selectionHint(workflow)) {
+            <p class="hint" role="status">{{ workflowDevices.selectionHint(workflow) }}</p>
+          }
+          @if (workflow.status === 'confirmed') {
+            <p class="hint">{{ workflow.device_serial }} remains confirmed until you confirm another device.</p>
+          }
+          <div class="card-actions">
+            <button type="button" class="text-button" (click)="workflowDevices.changeDevice(workflow.workflow_id)"
+              [disabled]="workflowDevices.isConfirming(workflow.workflow_id)">Reset choice</button>
+            <button type="button" class="confirm-button" (click)="workflowDevices.confirm(workflow.workflow_id)"
+              [disabled]="!workflowDevices.canConfirm(workflow)">
+              {{ workflowDevices.isConfirming(workflow.workflow_id) ? 'Confirming…' : 'Confirm device' }}
+            </button>
+          </div>
+        } @else {
+          <p class="confirmed-device">Device: {{ workflow.device_serial }}</p>
+          <p class="hint" role="status">{{ workflow.status === 'starting' ? 'Codex is starting execution.' : 'Waiting for Codex to start.' }}</p>
+          @if (workflow.status === 'confirmed') {
+            @if (workflowDevices.selectionHint(workflow); as hint) {
+              <p class="warning">{{ hint }}</p>
+            }
+            <button type="button" class="text-button" (click)="workflowDevices.changeDevice(workflow.workflow_id)">Change device</button>
+          }
+        }
+        @if (workflowDevices.errorFor(workflow)) {
+          <p class="warning" role="alert">{{ workflowDevices.errorFor(workflow) }}</p>
+        }
+        <p class="execution-hint">Device is checked again when execution starts. Confirmation does not reserve it.</p>
+      </article>
+    }
+  </section>
+}
