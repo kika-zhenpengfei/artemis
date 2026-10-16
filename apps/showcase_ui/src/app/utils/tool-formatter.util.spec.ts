@@ -6,6 +6,7 @@ import {
   getCompressionPhaseLabel,
   isCompressionWaiting,
   getToolDisplayLabel,
+  getRecordedToolResult,
   getToolIcon,
   getToolTargetText,
   getUniqueGenericTools,
@@ -13,6 +14,56 @@ import {
   joinTargetDescriptions,
   shouldShowTool
 } from './tool-formatter.util';
+
+describe('external executor result cards', () => {
+  it('exposes the complete final conclusion recorded in a historical tool trace', () => {
+    const summary = '插屏与激励基础流程通过。\n提前关闭未验证，不能声称通过。';
+    const result = getRecordedToolResult({
+      name: 'codex_summary', status: 'success', payload: { args: { summary } }
+    });
+
+    expect(result?.kind).toBe('summary');
+    expect(result?.title).toBe('Final conclusion');
+    expect(result?.body).toBe(summary);
+  });
+
+  it('shows each verification assertion with its recorded evidence and verdict', () => {
+    for (const status of ['passed', 'failed'] as const) {
+      const result = getRecordedToolResult({
+        name: 'verify',
+        payload: { args: { assertion: '广告关闭后回到测试页', status, evidence: '页面回调记录和截图' } }
+      });
+      expect(result?.title).toBe('广告关闭后回到测试页');
+      expect(result?.body).toBe('页面回调记录和截图');
+      expect(result?.status).toBe(status);
+    }
+  });
+
+  it('shows final conclusions from other external executors', () => {
+    const result = getRecordedToolResult({
+      name: 'zcode_summary', status: 'success', payload: { summary: 'ZCode verification complete' }
+    });
+    expect(result?.kind).toBe('summary');
+    expect(result?.body).toBe('ZCode verification complete');
+    expect(getRecordedToolResult({ name: 'other_summary', args: { unrelated: 'value' } })).toBeNull();
+  });
+
+  it('preserves inconclusive even when the transport marked the trace failed', () => {
+    const result = getRecordedToolResult({
+      name: 'verify', status: 'failed',
+      payload: { args: { assertion: '提前关闭不发奖', status: 'inconclusive', evidence: '素材没有关闭入口' } }
+    });
+    expect(result?.status).toBe('inconclusive');
+    expect(result?.statusLabel).toBe('Inconclusive');
+    expect(result?.body).toBe('素材没有关闭入口');
+  });
+
+  it('does not infer a passed verdict from a successful tool without a verification result', () => {
+    expect(getRecordedToolResult({ name: 'verify', status: 'success', args: { assertion: 'Check' } })?.status)
+      .toBe('inconclusive');
+    expect(getRecordedToolResult({ name: 'click', status: 'success' })).toBeNull();
+  });
+});
 
 describe('compress_history timeline line', () => {
   const trace = (status: string, args: Record<string, any>) => ({

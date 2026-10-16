@@ -1079,8 +1079,26 @@ limitations under the License.
                                     }
                                   </div>
                                 }
+                                <!-- Recorded executor results contain the actual verdict and evidence. -->
+                                @if (shouldShowTool(item.data, block.data)) {
+                                  @if (getRecordedToolResult(item.data); as result) {
+                                    <section class="recorded-result-card" [ngClass]="'result-' + result.status"
+                                      [attr.aria-label]="result.kind === 'summary' ? 'Final conclusion' : 'Verification result'">
+                                      <div class="recorded-result-header">
+                                        <span class="material-symbols-outlined">
+                                          {{ result.kind === 'summary' ? 'summarize' : getVerdictIcon(result.status) }}
+                                        </span>
+                                        <strong>{{ result.title }}</strong>
+                                        <span class="recorded-result-status">{{ result.statusLabel }}</span>
+                                      </div>
+                                      @if (result.body) {
+                                        <p class="recorded-result-body">{{ result.body }}</p>
+                                      }
+                                    </section>
+                                  }
+                                }
                                 <!-- Generic Tool Calls (Text format for note tools, video analyzer, and other sub-agents) -->
-                                @if (shouldShowTool(item.data, block.data) && !isDeviceActionTool(item.data)) {
+                                @if (shouldShowTool(item.data, block.data) && !isDeviceActionTool(item.data) && !getRecordedToolResult(item.data)) {
                                   <div class="step-generic-tool"
                                     [class.is-running]="isToolLineRunning(item, block)"
                                     [class.is-note-tool]="isNoteTool(item.data)"

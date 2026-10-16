@@ -189,7 +189,7 @@ async def get_task_plan(session_id: str):
 
 @router.get("/api/sessions/{session_id}/notes")
 async def get_all_notes(session_id: str):
-    return {"notes": media_service.get_session_notes_content(session_id)}
+    return {"notes": await asyncio.to_thread(media_service.get_session_notes_content, session_id)}
 
 
 @router.get("/api/sessions/{session_id}/checks")

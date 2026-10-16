@@ -179,6 +179,7 @@ import {
 
 import {
   getToolArgs,
+  getRecordedToolResult,
   isNoteTool,
   isVideoTool,
   getVideoAnalysisView,
@@ -1967,6 +1968,8 @@ export class AgentStreamComponent implements AfterViewInit {
   public getToolArgs(tool: any): any {
     return getToolArgs(tool);
   }
+
+  public getRecordedToolResult = getRecordedToolResult;
 
   public getToolIcon(tool: any): string {
     return getToolIcon(tool);

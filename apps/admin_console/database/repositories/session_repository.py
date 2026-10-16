@@ -398,6 +398,72 @@ class SessionRepository:
         except Exception:
             return None
 
+    def get_external_execution_report(self, session_id: str) -> dict[str, Any] | None:
+        """Read existing executor evidence without inventing a test workflow."""
+        session = self.get_session_by_id(session_id)
+        if not session:
+            return None
+        try:
+            device_info = json.loads(session.get("device_info") or "{}")
+        except (TypeError, ValueError):
+            return None
+        if (
+            not isinstance(device_info, dict)
+            or device_info.get("execution_mode") != "external_agent"
+        ):
+            return None
+
+        with db_session(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT t.name, t.payload, t.step_id, s.pre_image_name "
+                "FROM traces t LEFT JOIN steps s ON s.step_id = t.step_id "
+                "AND s.session_id = t.session_id "
+                "WHERE t.session_id = ? AND t.type = 'tool' "
+                "AND (t.name = 'verify' OR substr(t.name, -8) = '_summary') "
+                "ORDER BY t.timestamp ASC, t.trace_id ASC",
+                (session_id,),
+            ).fetchall()
+
+        summary = None
+        verifications = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if row["name"] != "verify":
+                text = payload.get("summary")
+                if isinstance(text, str) and text.strip():
+                    summary = text
+                continue
+            args = payload.get("args")
+            if not isinstance(args, dict) or args.get("status") not in (
+                "passed",
+                "failed",
+                "inconclusive",
+            ):
+                continue
+            if not all(
+                isinstance(args.get(key), str) and args[key].strip()
+                for key in ("assertion", "evidence")
+            ):
+                continue
+            verifications.append(
+                {
+                    **args,
+                    "step_id": row["step_id"],
+                    "image_name": row["pre_image_name"],
+                }
+            )
+        return {
+            "session": session,
+            "device_info": device_info,
+            "summary": summary,
+            "verifications": verifications,
+        }
+
     def harvest_orphaned_sessions(self, orphaned_ids: list[str]) -> int:
         if not orphaned_ids:
             return 0

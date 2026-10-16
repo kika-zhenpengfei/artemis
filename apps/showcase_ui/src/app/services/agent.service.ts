@@ -1603,6 +1603,18 @@ export class AgentService {
             this.fetchSessions();
           }
 
+          // A missed session_ended event must not leave the selected run's
+          // conclusion/notes stale after status polling observes completion.
+          if (!isActive && (oldStatus === 'running' || oldStatus === 'paused')) {
+            this.deviceSelection.refresh();
+            if (oldRunningSessionId && this.currentSessionId() === oldRunningSessionId) {
+              this.fetchNotes(oldRunningSessionId);
+              this.fetchTestWorkflow(oldRunningSessionId);
+              this.fetchChecks(oldRunningSessionId);
+              this.backfillSessionSteps(oldRunningSessionId);
+            }
+          }
+
           if (
             !isActive
             && (oldStatus === 'running' || oldStatus === 'paused')

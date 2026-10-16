@@ -62,6 +62,43 @@ function computeToolArgs(tool: any): any {
   return {};
 }
 
+export interface RecordedToolResult {
+  kind: 'summary' | 'verification';
+  title: string;
+  status: 'summary' | 'passed' | 'failed' | 'inconclusive';
+  statusLabel: string;
+  body: string;
+}
+
+/** External executors record their conclusions and evidence as tool arguments. */
+export function getRecordedToolResult(tool: any): RecordedToolResult | null {
+  const name = String(tool?.name || '').replace(/^(_)?(self\.)?exec_/, '').toLowerCase();
+  const isSummary = name.endsWith('_summary');
+  if (!isSummary && name !== 'verify') return null;
+  const args = getToolArgs(tool);
+  if (isSummary) {
+    if (typeof args.summary !== 'string') return null;
+    return {
+      kind: 'summary',
+      title: 'Final conclusion',
+      status: 'summary',
+      statusLabel: 'Summary',
+      body: typeof args.summary === 'string' ? args.summary : ''
+    };
+  }
+  // The transport trace can be marked "failed" for an inconclusive check.
+  // Only the recorded verification verdict determines the displayed result.
+  const status = args.status === 'passed' || args.status === 'failed'
+    ? args.status : 'inconclusive';
+  return {
+    kind: 'verification',
+    title: typeof args.assertion === 'string' ? args.assertion : 'Verification',
+    status,
+    statusLabel: status === 'passed' ? 'Passed' : status === 'failed' ? 'Failed' : 'Inconclusive',
+    body: typeof args.evidence === 'string' ? args.evidence : ''
+  };
+}
+
 /**
  * Check if a tool is one of the five note-related tools
  */
