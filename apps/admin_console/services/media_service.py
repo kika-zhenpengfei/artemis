@@ -28,6 +28,11 @@ from fastapi import HTTPException
 
 from artemis.config import IMAGES_DIR, TRACES_PATH, WORKSPACE_ROOT
 
+try:
+    from admin_console.database.repositories.session_repository import session_repo
+except ImportError:
+    from apps.admin_console.database.repositories.session_repository import session_repo
+
 logger = logging.getLogger(__name__)
 
 
@@ -602,6 +607,14 @@ class MediaService:
                     except Exception as e:
                         notes_content[file.name] = f"Error reading file: {e}"
 
+        # Ad-hoc external-agent runs persist their goal, verifications and close
+        # summary in SQLite/status.json, rather than workflow Markdown files.
+        # Project those records on read so historical runs are visible as well.
+        # A source-linked workflow always owns its own plan and report.
+        if not (TRACES_PATH / session_id / "test_workflow.json").exists():
+            for key, content in MediaService._external_execution_notes(session_id).items():
+                notes_content.setdefault(key, content)
+
         if not notes_content:
             global_notes_dir = TRACES_PATH / "notes"
             if global_notes_dir.exists() and global_notes_dir.is_dir():
@@ -618,6 +631,105 @@ class MediaService:
                             notes_content[file.name] = f"Error reading file: {e}"
 
         return notes_content
+
+    @staticmethod
+    def _external_execution_notes(session_id: str) -> dict[str, str]:
+        report = session_repo.get_external_execution_report(session_id)
+        if report is None:
+            return {}
+        session = report["session"]
+        device_info = report["device_info"]
+        goal = session.get("initial_goal") or "No goal was recorded."
+        status = session.get("status") or "unknown"
+        terminal = status in {"completed", "failed", "cancelled"}
+        summary = report["summary"]
+        if not summary and terminal:
+            try:
+                persisted = json.loads(
+                    (TRACES_PATH / session_id / "status.json").read_text(encoding="utf-8")
+                )
+                if isinstance(persisted, dict):
+                    value = persisted.get("result") or persisted.get("error")
+                    if isinstance(value, str) and value.strip():
+                        summary = value
+            except (OSError, ValueError):
+                pass
+
+        context = [
+            "# Session context",
+            "",
+            "## Goal",
+            "",
+            goal,
+            "",
+            f"- Run status: **{status}**",
+            f"- Agent: {device_info.get('profile') or 'external agent'}",
+            f"- Device: {device_info.get('device_id') or 'not recorded'}",
+            "",
+            "This run used an external agent without a structured test workflow. "
+            "This context describes recorded session metadata; no advance plan is "
+            "inferred. The report shows the verification results and evidence saved "
+            "during execution. Separately saved notes and plans remain available.",
+        ]
+        verifications = report["verifications"]
+        counts = {
+            outcome: sum(item["status"] == outcome for item in verifications)
+            for outcome in ("passed", "failed", "inconclusive")
+        }
+        lines = [
+            "# Execution report",
+            "",
+            "## Goal",
+            "",
+            goal,
+            "",
+            f"Run status: **{status}**.",
+            "",
+            "Verification outcomes determine the test result; run status records "
+            "the session lifecycle only.",
+            "",
+            "## Final conclusion" if terminal else "## Current progress",
+            "",
+            summary
+            if terminal and summary
+            else (
+                "No final summary was recorded."
+                if terminal
+                else "The session is still open; a final conclusion is not available yet."
+            ),
+            "",
+            "## Recorded verifications",
+            "",
+            f"**{counts['passed']} passed · {counts['failed']} failed · "
+            f"{counts['inconclusive']} inconclusive**",
+            "",
+        ]
+        if not verifications:
+            lines.extend(["No verification results were recorded; test success is unverified.", ""])
+        for index, item in enumerate(verifications, 1):
+            lines.extend(
+                [
+                    f"### {index}. {item['assertion']}",
+                    "",
+                    f"Outcome: **{item['status']}**",
+                    "",
+                    item["evidence"],
+                    "",
+                ]
+            )
+            if item.get("image_name"):
+                lines.extend(
+                    [
+                        "Screenshot evidence is saved with the matching verification "
+                        "in the Tasks timeline.",
+                        "",
+                    ]
+                )
+        lines.append("Generated from persisted session records. No test plan or result was added.")
+        return {
+            "session_context.md": "\n".join(context),
+            "test_report.md": "\n".join(lines),
+        }
 
 
 media_service = MediaService()

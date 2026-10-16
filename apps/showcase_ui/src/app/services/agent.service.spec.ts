@@ -76,6 +76,72 @@ describe('AgentService notes request ordering', () => {
   });
 });
 
+describe('AgentService completion polling recovery', () => {
+  let service: AgentService;
+  let response: Record<string, any>;
+  let refreshDevices: jasmine.Spy;
+
+  beforeEach(() => {
+    service = Object.create(AgentService.prototype) as AgentService;
+    response = { status: 'idle', session_id: null, active_tasks: [], queue: [] };
+    (service as any).http = { get: () => of(response) };
+    refreshDevices = jasmine.createSpy('refreshDevices');
+    (service as any).deviceSelection = { refresh: refreshDevices };
+    (service as any).pendingQueue = signal<any[]>([]);
+    service.agentStatus = signal('running');
+    service.runningSessionId = signal<string | null>('finished-run');
+    service.runningGoal = signal<string | null>('Run checks');
+    service.currentSessionId = signal<string | null>('finished-run');
+    service.userPinnedSessionId = signal<string | null>(null);
+    service.activeTasks = signal<any[]>([{ session_id: 'finished-run' }]);
+    service.isPaused = signal(false);
+    service.pausedError = signal<string | null>(null);
+    service.isVideoWindowOpen = signal(false);
+    spyOn(service, 'fetchSessions');
+    spyOn(service, 'fetchNotes');
+    spyOn(service, 'fetchTestWorkflow');
+    spyOn(service, 'fetchChecks');
+    spyOn(service as any, 'backfillSessionSteps');
+  });
+
+  it('recovers the final snapshot and documents when the end event was missed', () => {
+    service.fetchStatus();
+
+    expect(service.agentStatus()).toBe('idle');
+    expect(service.activeTasks()).toEqual([]);
+    expect(service.fetchNotes).toHaveBeenCalledOnceWith('finished-run');
+    expect(service.fetchTestWorkflow).toHaveBeenCalledOnceWith('finished-run');
+    expect(service.fetchChecks).toHaveBeenCalledOnceWith('finished-run');
+    expect((service as any).backfillSessionSteps).toHaveBeenCalledOnceWith('finished-run');
+    expect(refreshDevices).toHaveBeenCalledTimes(1);
+
+    service.fetchStatus();
+    expect(service.fetchNotes).toHaveBeenCalledTimes(1);
+    expect(refreshDevices).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes device availability without replacing a different selected history run', () => {
+    service.currentSessionId.set('history-run');
+    service.fetchStatus();
+
+    expect(refreshDevices).toHaveBeenCalledTimes(1);
+    expect(service.currentSessionId()).toBe('history-run');
+    expect(service.fetchNotes).not.toHaveBeenCalled();
+    expect(service.fetchTestWorkflow).not.toHaveBeenCalled();
+    expect(service.fetchChecks).not.toHaveBeenCalled();
+    expect((service as any).backfillSessionSteps).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh terminal content while the same run is still active', () => {
+    response = { status: 'running', session_id: 'finished-run', active_tasks: [], queue: [] };
+    service.fetchStatus();
+
+    expect(service.fetchNotes).not.toHaveBeenCalled();
+    expect(service.fetchChecks).not.toHaveBeenCalled();
+    expect(refreshDevices).not.toHaveBeenCalled();
+  });
+});
+
 describe('AgentService live LLM retry timeline', () => {
   function createServiceWithoutPolling(): AgentService {
     const service = Object.create(AgentService.prototype) as AgentService;

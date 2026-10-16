@@ -1507,6 +1507,49 @@ $stream-row-height: 25px;
               }
             }
 
+            .recorded-result-card {
+              margin: 6px 0;
+              padding: 12px 14px;
+              border: 1px solid #e2e8f0;
+              border-left: 3px solid #64748b;
+              border-radius: 8px;
+              background: #ffffff;
+              color: #334155;
+
+              &.result-passed { border-left-color: #15803d; }
+              &.result-failed { border-left-color: #b91c1c; }
+              &.result-inconclusive { border-left-color: #a16207; }
+
+              .recorded-result-header {
+                display: flex;
+                align-items: flex-start;
+                gap: 8px;
+                font-size: 13px;
+                line-height: 1.5;
+
+                .material-symbols-outlined { font-size: 18px; }
+                strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+              }
+
+              .recorded-result-status {
+                flex-shrink: 0;
+                font-size: 12px;
+                font-weight: 600;
+              }
+
+              &.result-passed .recorded-result-status { color: #15803d; }
+              &.result-failed .recorded-result-status { color: #b91c1c; }
+              &.result-inconclusive .recorded-result-status { color: #a16207; }
+
+              .recorded-result-body {
+                margin: 8px 0 0;
+                font-size: 13px;
+                line-height: 1.65;
+                white-space: pre-wrap;
+                overflow-wrap: anywhere;
+              }
+            }
+
             .step-generic-tool {
               border: 1px solid transparent;
 
