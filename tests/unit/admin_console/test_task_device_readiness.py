@@ -27,6 +27,15 @@ from artemis.core.diagnostics.schema import (
 )
 
 
+@pytest.fixture(autouse=True)
+def idle_device(monkeypatch):
+    from artemis.runtime.device_pool import DeviceStatus
+
+    monkeypatch.setattr(tasks.device_pool, "try_list_devices_async", AsyncMock(
+        return_value=[DeviceStatus("emulator-5556", "device")],
+    ))
+
+
 @pytest.mark.asyncio
 async def test_run_task_rejects_locked_device(monkeypatch):
     locked_probe = ProbeResult(
@@ -74,8 +83,8 @@ async def test_run_task_enqueues_when_device_is_unlocked(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_run_task_binds_probe_verified_device_when_no_serial_requested(monkeypatch):
-    """Without an explicit serial, run_task enqueues on the probe-verified live device."""
+async def test_run_task_probes_and_enqueues_automatically_allocated_device(monkeypatch):
+    """The submission probe checks the same idle device used by the queue."""
     unlocked_probe = ProbeResult(
         id="android_adb",
         category=ProbeCategory.DEVICE,
@@ -99,7 +108,7 @@ async def test_run_task_binds_probe_verified_device_when_no_serial_requested(mon
 
     assert result["status"] == "started"
     enqueue_tasks.assert_awaited_once()
-    # Check that device_serial passed to enqueue_tasks is the verified unlocked device
+    run_probe.assert_awaited_once_with(target_serial="emulator-5556")
     _, kwargs = enqueue_tasks.call_args
     assert kwargs.get("device_serial") == "emulator-5556"
 

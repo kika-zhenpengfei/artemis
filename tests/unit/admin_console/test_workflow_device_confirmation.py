@@ -75,20 +75,23 @@ def test_busy_or_changed_endpoint_cannot_confirm(workflow_api, monkeypatch):
     assert response.status_code == 409
     assert "ADB server changed" in response.json()["detail"]
     assert resolve.await_count == 1
-    assert client.post(url, json={"device_serial": "phone-A"}).status_code == 422
+    assert client.post(url, json={}).status_code == 422
     assert client.post("/api/test_workflows/not-a-uuid/confirm_device", json={
         "device_serial": "phone-A", "expected_adb_endpoint_id": "endpoint",
     }).status_code == 422
 
 
-def test_prepared_run_waits_without_device_confirmation(workflow_api, monkeypatch):
+def test_prepared_run_starts_without_device_confirmation(workflow_api, monkeypatch):
     client, ids = workflow_api
-    run = AsyncMock()
+    run = AsyncMock(return_value={"status": "completed"})
+    resolve = AsyncMock(return_value=("phone-A", True))
+    monkeypatch.setattr(sessions, "resolve_device_selection", resolve)
     monkeypatch.setattr(sessions, "PreparedWorkflowRunner", lambda: SimpleNamespace(validate=lambda _: None, run=run))
     monkeypatch.setattr(sessions, "_prepared_runs", {})
     monkeypatch.setattr(sessions, "_prepared_runners", {})
-    response = client.post(f"/api/test_workflows/{ids[0]}/run", json={"device_serial": "phone-A"})
+    response = client.post(f"/api/test_workflows/{ids[0]}/run", json={})
     assert response.status_code == 200
-    assert response.json()["status"] == "awaiting_device"
-    assert sessions._prepared_runs == {}
-    run.assert_not_awaited()
+    assert response.json()["status"] == "starting"
+    assert ids[0] in sessions._prepared_runs
+    assert resolve.call_args.args == (None,)
+    run.assert_awaited_once()

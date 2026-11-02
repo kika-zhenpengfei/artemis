@@ -31,24 +31,24 @@ from artemis.runtime import trace_store
 
 
 @pytest.fixture
-def confirmed_device(monkeypatch):
-    """These runner/control tests start after the separate confirmation boundary."""
+def automatic_device(monkeypatch):
+    """Prepared workflows allocate an idle device without a confirmation."""
     endpoint = sessions.check_adb_endpoint().identity
     monkeypatch.setattr(sessions.WorkflowStartStore, "status", lambda _self, workflow_id: {
-        "workflow_id": workflow_id, "status": "confirmed",
+        "workflow_id": workflow_id, "status": "awaiting_device",
         "device_serial": "device-1", "adb_endpoint_id": endpoint,
     })
 
     async def resolve(serial, **kwargs):
-        assert serial == "device-1"
+        assert serial in {None, "device-1"}
         assert kwargs["require_idle"] is True
         assert kwargs["expected_adb_endpoint_id"] == endpoint
-        return serial, True
+        return "device-1", True
 
     monkeypatch.setattr(sessions, "resolve_device_selection", resolve)
 
 
-def test_prepared_workflow_run_reports_completion(monkeypatch, confirmed_device):
+def test_prepared_workflow_run_reports_completion(monkeypatch, automatic_device):
     class FakeRunner:
         def validate(self, workflow_id):
             assert workflow_id == "workflow-1"
@@ -78,7 +78,7 @@ def test_prepared_workflow_run_reports_completion(monkeypatch, confirmed_device)
     asyncio.run(scenario())
 
 
-def test_webui_handoff_uses_same_runner_for_codex_actions(monkeypatch, confirmed_device):
+def test_webui_handoff_uses_same_runner_for_codex_actions(monkeypatch, automatic_device):
     class FakeManager:
         async def observe(self, workflow_id, **_kwargs):
             assert workflow_id == "workflow-2"
@@ -139,7 +139,7 @@ def test_webui_handoff_uses_same_runner_for_codex_actions(monkeypatch, confirmed
     asyncio.run(scenario())
 
 
-def test_concurrent_device_checks_cannot_start_same_prepared_workflow_twice(monkeypatch, confirmed_device):
+def test_concurrent_device_checks_cannot_start_same_prepared_workflow_twice(monkeypatch, automatic_device):
     async def scenario():
         both_resolving = asyncio.Event()
         finish_run = asyncio.Event()

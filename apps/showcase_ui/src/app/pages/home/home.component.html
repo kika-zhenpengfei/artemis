@@ -78,15 +78,10 @@
       </div>
     </div>
 
-    @if (activeTab() !== 'tests') {
-      <app-device-selector [disabled]="isSubmitting()" />
-    }
-
     @if (activeTab() === 'tests') {
       <section class="test-plans-view">
         <h2>Test plans and results</h2>
-        <p>Confirm a device for each waiting workflow, then review cases and results.</p>
-        <app-workflow-device-queue />
+        <p>Tests automatically use an idle device. Review cases and results here.</p>
         <app-test-workflow-panel />
       </section>
     }
@@ -771,30 +766,6 @@
                   </div>
                 </div>
 
-                <!-- Multi-Device Switcher if multiple devices detected -->
-                @if (connectedDevices().length > 1) {
-                  <div class="multi-device-switcher">
-                    <span class="switcher-label">Diagnostic device:</span>
-                    <div class="switcher-chips">
-                      @for (dev of connectedDevices(); track dev.serial) {
-                        <button
-                          type="button"
-                          class="device-chip-btn"
-                          [class.selected]="dev.serial === activeDevice()?.serial"
-                          (click)="selectDiagnosticDevice(dev.serial)"
-                        >
-                          <span class="material-symbols-outlined chip-icon">
-                            phone_android
-                          </span>
-                          <span>{{ dev.model || dev.serial }}</span>
-                          @if (dev.serial === activeDevice()?.serial) {
-                            <span class="active-check">✓ Inspecting</span>
-                          }
-                        </button>
-                      }
-                    </div>
-                  </div>
-                }
               </div>
             }
 
@@ -1582,30 +1553,6 @@
                   </button>
                 </div>
 
-                <!-- Multi-Device Switcher if multiple devices detected -->
-                @if (connectedDevices().length > 1) {
-                  <div class="multi-device-switcher" style="margin-top: 12px;">
-                    <span class="switcher-label">Diagnostic device:</span>
-                    <div class="switcher-chips">
-                      @for (dev of connectedDevices(); track dev.serial) {
-                        <button
-                          type="button"
-                          class="device-chip-btn"
-                          [class.selected]="dev.serial === activeDevice()?.serial"
-                          (click)="selectDiagnosticDevice(dev.serial)"
-                        >
-                          <span class="material-symbols-outlined chip-icon">
-                            phone_android
-                          </span>
-                          <span>{{ dev.model || dev.serial }}</span>
-                          @if (dev.serial === activeDevice()?.serial) {
-                            <span class="active-check">✓ Inspecting</span>
-                          }
-                        </button>
-                      }
-                    </div>
-                  </div>
-                }
               </div>
             }
 
@@ -1841,7 +1788,7 @@
                 class="btn-run-composer"
                 [class.btn-run-pro]="selectedProfile() === 'pro'"
                 [disabled]="!taskGoal().trim() || isSubmitting() || !canLaunchTask()"
-                [title]="!deviceSelection.canStart() ? 'Select an idle online device first' : !canLaunchTask() ? 'Complete System Setup before running' : 'Run task'"
+                [title]="!canLaunchTask() ? 'Complete System Setup before running' : 'Run task'"
                 (click)="runTask()"
               >
                 @if (isSubmitting()) {

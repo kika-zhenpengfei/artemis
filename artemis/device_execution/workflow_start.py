@@ -1,4 +1,4 @@
-"""Persist device confirmation separately from a source-linked test plan."""
+"""Persist exclusive startup claims separately from a source-linked test plan."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ class WorkflowStartError(ValueError):
 
 
 class WorkflowStartStore:
-    """A confirmation is an execution intent, not a device reservation."""
+    """Serialize workflow startup while the runtime acquires an idle device."""
 
     @staticmethod
     def _directory(workflow_id: str) -> Path:
@@ -50,7 +50,7 @@ class WorkflowStartStore:
         except FileNotFoundError:
             return None
         except (OSError, ValueError) as exc:
-            raise WorkflowStartError("Could not read workflow device confirmation.", 503) from exc
+            raise WorkflowStartError("Could not read workflow startup state.", 503) from exc
 
     def _workflow(self, workflow_id: str) -> dict[str, Any]:
         workflow = self._read(self._directory(workflow_id) / "test_workflow.json")
@@ -62,7 +62,7 @@ class WorkflowStartStore:
     def _locked(self, workflow_id: str):
         with trace_store._status_lock(str(self._path(workflow_id))) as acquired:
             if not acquired:
-                raise WorkflowStartError("Workflow device confirmation is busy. Try again.", 503)
+                raise WorkflowStartError("Workflow startup state is busy. Try again.", 503)
             yield
 
     @staticmethod
@@ -98,7 +98,7 @@ class WorkflowStartStore:
             record.get("owner_pid"), record.get("owner_created_at"),
         ):
             self._undo_start_binding(workflow)
-            record = self._waiting(workflow, "The previous startup was interrupted. Confirm a device again.")
+            record = self._waiting(workflow, "The previous startup was interrupted. Retry device allocation.")
             self._save(record)
         if workflow["phase"] in {"running", "finished"}:
             return {
@@ -106,12 +106,12 @@ class WorkflowStartStore:
                 "device_serial": workflow.get("device_serial"),
             }
         if workflow["phase"] != "planned":
-            raise WorkflowStartError("Generate test cases before confirming a device.")
+            raise WorkflowStartError("Generate test cases before starting a workflow.")
         if record is None:
             record = self._waiting(workflow)
             self._save(record)
         elif record.get("plan_fingerprint") != self._fingerprint(workflow):
-            record = self._waiting(workflow, "The test plan changed. Confirm a device again.")
+            record = self._waiting(workflow, "The test plan changed. Retry device allocation.")
             self._save(record)
         return record
 
@@ -167,15 +167,10 @@ class WorkflowStartStore:
             record = self._state(self._workflow(workflow_id))
             if record["status"] in {"starting", "running"}:
                 raise WorkflowStartError("The test workflow is already starting or running.")
-            if record["status"] != "confirmed":
-                return self._public(record)
-            if device_serial is not None and device_serial != record["device_serial"]:
-                raise WorkflowStartError("device_serial must match the confirmed device.")
-            if adb_endpoint_id is not None and adb_endpoint_id != record["adb_endpoint_id"]:
-                raise WorkflowStartError("ADB endpoint must match the confirmed device.")
             record.update(
                 status="starting", claim_token=uuid4().hex, owner_pid=os.getpid(),
                 owner_created_at=trace_store._own_create_time(),
+                device_serial=device_serial, adb_endpoint_id=adb_endpoint_id, error=None,
             )
             self._save(record)
             return {**self._public(record), "claim_token": record["claim_token"]}
@@ -190,7 +185,7 @@ class WorkflowStartStore:
                 raise WorkflowStartError("The test plan changed during startup.")
             if workflow["phase"] != "running":
                 raise WorkflowStartError("The workflow has not opened its device session.")
-            record.update(status="running", error=None)
+            record.update(status="running", device_serial=workflow.get("device_serial"), error=None)
             self._save(record)
             return self._public(record)
 

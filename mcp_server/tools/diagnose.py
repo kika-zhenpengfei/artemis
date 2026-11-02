@@ -845,13 +845,13 @@ def _next_steps(
         if executor_only:
             steps.append(
                 f"Environment is ready. Open a current-{_external_agent_name()} device lease with "
-                "mobile_session(operation='open'); pass device_serial when more than one "
-                "device is attached."
+                "mobile_session(operation='open'); omit device_serial to automatically "
+                "allocate an idle device."
             )
         else:
             steps.append(
-                "Environment is ready. Use mobile_run_task to delegate a task; pass "
-                "device_serial when more than one device is attached."
+                "Environment is ready. Use mobile_run_task to delegate a task; omit "
+                "device_serial to automatically allocate an idle device."
             )
         return steps
 

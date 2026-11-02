@@ -267,12 +267,8 @@ def mobile_run_task(
           writes a report to `output.md` in `notes_dir`. Ignored for Flash.
         device_serial: Optional device serial (e.g. "emulator-5554") to bind
           execution to a specific device; distinct devices run concurrently.
-          If omitted, the saved WebUI device selection is used and must still
-          be online and idle; it never falls back to another device. Without
-          a saved selection, an available device is selected automatically.
-          When several devices are attached and no target was selected,
-          confirm it with the user first (`adb devices -l` lists serials
-          and authorization states).
+          If omitted, an online idle device with no queued reservations is
+          selected automatically. Saved WebUI device choices are ignored.
         verification_level: Optional, Pro only. Coarse Checker preset: `"off"`
           (no audit; the Operator self-reports), `"final"` (one exit review
           against the goal, the default), `"checkpoints"` (every plan

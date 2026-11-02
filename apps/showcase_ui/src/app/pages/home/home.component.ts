@@ -32,9 +32,6 @@ import {
 } from '../../core/data/smart-tasks.data';
 import { TaskRecommendationService } from '../../core/services/task-recommendation.service';
 import { TestWorkflowPanelComponent } from '../../components/test-workflow-panel/test-workflow-panel.component';
-import { DeviceSelectorComponent } from '../../components/device-selector/device-selector.component';
-import { WorkflowDeviceQueueComponent } from '../../components/workflow-device-queue/workflow-device-queue.component';
-import { DeviceSelectionService } from '../../services/device-selection.service';
 import {
   DEFAULT_EXPLORER_MODE,
   DEFAULT_VERIFICATION_LEVEL,
@@ -107,7 +104,7 @@ type AdbGuideTab = 'emulator' | 'usb' | 'wifi' | 'remote';
 @Component({
   selector: 'app-home',
   standalone: true,
-  imports: [FormsModule, TestWorkflowPanelComponent, DeviceSelectorComponent, WorkflowDeviceQueueComponent],
+  imports: [FormsModule, TestWorkflowPanelComponent],
   templateUrl: './home.component.html',
   changeDetection: ChangeDetectionStrategy.Eager,
   styleUrl: './home.component.scss'
@@ -115,7 +112,6 @@ type AdbGuideTab = 'emulator' | 'usb' | 'wifi' | 'remote';
 export class HomeComponent implements OnInit, OnDestroy {
   public agentService = inject(AgentService);
   public systemService = inject(SystemService);
-  public deviceSelection = inject(DeviceSelectionService);
   public taskRecService = inject(TaskRecommendationService);
   private router = inject(Router);
 
@@ -373,12 +369,11 @@ export class HomeComponent implements OnInit, OnDestroy {
   public isSkipCredentialsCheck = computed(() => this.systemService.isSkipCredentialsCheck());
   public isDeviceReady = computed(() => this.systemService.isDeviceReady());
   public canLaunchTask = computed(() =>
-    this.isEnvironmentReady() && this.isCredentialsReady() && this.deviceSelection.canStart()
+    this.isEnvironmentReady() && this.isCredentialsReady()
   );
 
   // Device information
   public activeDevice = computed(() => this.systemService.activeDevice());
-  public connectedDevices = computed(() => this.systemService.connectedDevices());
   public installedAvds = computed(() => this.systemService.installedAvds());
   public emulatorPath = computed(() => this.systemService.emulatorPath());
   public isEmulatorInPath = computed(() => this.systemService.isEmulatorInPath());
@@ -1016,10 +1011,6 @@ export class HomeComponent implements OnInit, OnDestroy {
     this.systemService.dismissEmulatorStatus().subscribe();
   }
 
-  public selectDiagnosticDevice(serial: string): void {
-    this.systemService.selectDevice(serial).subscribe();
-  }
-
   public getEmulatorCommand(avdName: string): string {
     const p = this.emulatorPath();
     const cmd = this.isEmulatorInPath() ? 'emulator' : (p || '~/Android/Sdk/emulator/emulator');
@@ -1087,11 +1078,6 @@ export class HomeComponent implements OnInit, OnDestroy {
     if (!this.isEnvironmentReady() || !this.isCredentialsReady()) {
       this.errorMessage.set('System prerequisites are not satisfied. Please review System Setup first.');
       this.activeTab.set('diagnostics');
-      return;
-    }
-
-    if (!this.deviceSelection.canStart()) {
-      this.errorMessage.set('Select an idle online device before starting a task.');
       return;
     }
 

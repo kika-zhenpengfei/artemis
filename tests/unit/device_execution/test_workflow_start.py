@@ -1,4 +1,4 @@
-"""Device confirmation is persisted without starting an execution session."""
+"""Workflow claims permit automatic allocation and serialize startup."""
 
 import asyncio
 from pathlib import Path
@@ -57,17 +57,14 @@ def test_published_plan_waits_without_device_and_confirmation_is_shared(workflow
     assert not (Path(trace_store.TRACES_DIR) / workflow_id / "status.json").exists()
 
 
-def test_start_claim_is_bound_to_confirmation_and_failure_allows_reselection(workflow):
+def test_start_claim_needs_no_confirmation_and_failure_allows_retry(workflow):
     from artemis.device_execution.workflow_start import WorkflowStartError, WorkflowStartStore
 
     _store, workflow_id, _cases = workflow
     starts = WorkflowStartStore()
-    assert starts.claim(workflow_id)["status"] == "awaiting_device"
-    starts.confirm(workflow_id, "phone-a", "endpoint-a")
-    with pytest.raises(WorkflowStartError, match="confirmed device"):
-        starts.claim(workflow_id, device_serial="phone-b")
     claimed = starts.claim(workflow_id)
     assert claimed["status"] == "starting"
+    assert claimed["device_serial"] is None
     with pytest.raises(WorkflowStartError, match="already starting"):
         starts.claim(workflow_id)
     with pytest.raises(WorkflowStartError, match="already starting"):
@@ -75,8 +72,7 @@ def test_start_claim_is_bound_to_confirmation_and_failure_allows_reselection(wor
     starts.failed(workflow_id, claimed["claim_token"], "Device busy")
     assert starts.status(workflow_id)["error"] == "Device busy"
     assert starts.status(workflow_id)["status"] == "awaiting_device"
-    starts.confirm(workflow_id, "phone-b", "endpoint-b")
-    assert starts.claim(workflow_id)["device_serial"] == "phone-b"
+    assert starts.claim(workflow_id)["status"] == "starting"
 
 
 def test_plan_edit_invalidates_confirmation_and_cannot_race_startup(workflow):
@@ -93,20 +89,49 @@ def test_plan_edit_invalidates_confirmation_and_cannot_race_startup(workflow):
         store.set_cases(workflow_id, profile="flash", cases=cases)
 
 
-def test_unconfirmed_open_does_not_touch_runtime_or_session_storage(workflow):
+def test_unconfirmed_open_attempts_automatic_allocation_without_creating_a_session_when_busy(workflow):
     from artemis.device_execution.manager import DeviceExecutionManager
+    from artemis.runtime.device_lock import DeviceBusyError
 
     _store, workflow_id, _cases = workflow
-    adapter = Mock(open=AsyncMock(), close=AsyncMock())
+    adapter = Mock(open=AsyncMock(side_effect=DeviceBusyError("No idle device")), close=AsyncMock())
     factory = Mock()
     manager = DeviceExecutionManager(runtime_adapter=adapter, data_engine_factory=factory)
-    result = asyncio.run(manager.open(goal="", workflow_id=workflow_id, device_serial="bypass"))
+    result = asyncio.run(manager.open(goal="", workflow_id=workflow_id))
     assert result["status"] == "awaiting_device"
     assert result["workflow_id"] == workflow_id
-    assert "WebUI" in result["next"]
-    adapter.open.assert_not_called()
+    assert "automatic" in result["next"]
+    adapter.open.assert_awaited_once()
+    assert adapter.open.call_args.kwargs["device_serial"] is None
     factory.assert_not_called()
     assert not (Path(trace_store.TRACES_DIR) / workflow_id / "status.json").exists()
+
+
+def test_workflow_opens_and_records_allocated_device_without_confirmation(workflow, tmp_path):
+    from artemis.context import ExecutionSetup
+    from artemis.device_execution.manager import DeviceExecutionManager, DeviceRuntime
+    from artemis.device_execution.workflow_start import WorkflowStartStore
+    from artemis.mcp.actuators.mock import MockActuator
+
+    async def scenario():
+        store, workflow_id, _cases = workflow
+        actuator = MockActuator(width=1000, height=2000)
+        actuator.ctx.execution_setup = ExecutionSetup(traces_path=tmp_path / "data")
+        runtime = DeviceRuntime(actuator.ctx, actuator, "allocated-phone", Mock())
+        adapter = Mock(open=AsyncMock(return_value=runtime), close=AsyncMock())
+        manager = DeviceExecutionManager(runtime_adapter=adapter)
+        result = await manager.open(goal="", workflow_id=workflow_id)
+        try:
+            assert result["status"] == "running"
+            assert result["device_serial"] == "allocated-phone"
+            assert adapter.open.call_args.kwargs["device_serial"] is None
+            assert store.snapshot(workflow_id)["device_serial"] == "allocated-phone"
+            assert WorkflowStartStore().status(workflow_id)["device_serial"] == "allocated-phone"
+        finally:
+            await manager.close(workflow_id)
+        adapter.close.assert_awaited_once_with(runtime)
+
+    asyncio.run(scenario())
 
 
 def test_startup_failure_and_cancellation_release_claim_for_reselection(workflow):
@@ -124,8 +149,8 @@ def test_startup_failure_and_cancellation_release_claim_for_reselection(workflow
         assert result["status"] == "awaiting_device"
         assert "busy" in result["error"]
         kwargs = adapter.open.call_args.kwargs
-        assert kwargs["device_serial"] == "phone-a"
-        assert kwargs["expected_adb_endpoint_id"] == "endpoint-a"
+        assert kwargs["device_serial"] is None
+        assert "expected_adb_endpoint_id" not in kwargs
         assert kwargs["lock_timeout_seconds"] == 0
 
         started = asyncio.Event()
@@ -172,7 +197,7 @@ def test_session_initialization_failure_closes_runtime_before_allowing_retry(wor
     asyncio.run(scenario())
 
 
-def test_prepared_runner_does_not_advance_unconfirmed_cases(workflow):
+def test_prepared_runner_does_not_advance_when_no_device_is_idle(workflow):
     from artemis.device_execution.manager import DeviceExecutionManager
     from artemis.device_execution.workflow_runner import PreparedWorkflowRunner
 
@@ -183,7 +208,9 @@ def test_prepared_runner_does_not_advance_unconfirmed_cases(workflow):
             "case_id": "C1", "final_assertion": visible,
             "steps": [{"kind": "auto", "action": "click", "locator": {"resource_id": "debug_button"}, "expect": visible}],
         }])
-        adapter = Mock(open=AsyncMock(), close=AsyncMock())
+        from artemis.runtime.device_lock import DeviceBusyError
+
+        adapter = Mock(open=AsyncMock(side_effect=DeviceBusyError("No idle device")), close=AsyncMock())
         manager = DeviceExecutionManager(runtime_adapter=adapter, data_engine_factory=Mock())
         manager.prepare_case = AsyncMock()
         manager.run_plan = AsyncMock()
@@ -191,13 +218,13 @@ def test_prepared_runner_does_not_advance_unconfirmed_cases(workflow):
         assert result["status"] == "awaiting_device"
         manager.prepare_case.assert_not_called()
         manager.run_plan.assert_not_called()
-        adapter.open.assert_not_called()
+        adapter.open.assert_awaited_once()
 
     asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("same_device", [False, True])
-def test_confirmed_workflows_use_independent_device_locks(workflow, tmp_path, same_device):
+def test_workflows_use_independent_device_locks(workflow, tmp_path, same_device):
     from artemis.context import ExecutionSetup
     from artemis.device_execution.manager import DeviceExecutionManager, DeviceRuntime
     from artemis.device_execution.workflow_start import WorkflowStartStore
@@ -214,8 +241,6 @@ def test_confirmed_workflows_use_independent_device_locks(workflow, tmp_path, sa
         )["workflow_id"]
         store.set_cases(second, profile="flash", cases=cases)
         starts = WorkflowStartStore()
-        starts.confirm(first, "phone-a", "mock-endpoint")
-        starts.confirm(second, "phone-a" if same_device else "phone-b", "mock-endpoint")
         entered = 0
         both_entered = asyncio.Event()
 
@@ -242,8 +267,8 @@ def test_confirmed_workflows_use_independent_device_locks(workflow, tmp_path, sa
         manager = DeviceExecutionManager(runtime_adapter=RuntimeAdapter())
         try:
             results = await asyncio.gather(
-                manager.open(goal="", workflow_id=first),
-                manager.open(goal="", workflow_id=second),
+                manager.open(goal="", workflow_id=first, device_serial="phone-a", expected_adb_endpoint_id="mock-endpoint"),
+                manager.open(goal="", workflow_id=second, device_serial="phone-a" if same_device else "phone-b", expected_adb_endpoint_id="mock-endpoint"),
             )
             assert [item["status"] for item in results].count("running") == (1 if same_device else 2)
             assert [item["status"] for item in results].count("awaiting_device") == (1 if same_device else 0)

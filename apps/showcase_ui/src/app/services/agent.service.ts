@@ -17,7 +17,6 @@
 import { Injectable, signal, inject, computed, DestroyRef, NgZone } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { DeviceSelectionService } from './device-selection.service';
 
 import { Session, ModelInfo, TaskQueueItem, AgentStatusResponse, SessionUsage, TestWorkflow } from '../core/models/session.model';
 import { ProTuningDefaults, ProTuningOptions } from '../core/models/pro-tuning.model';
@@ -71,7 +70,6 @@ interface SessionVideoResponse {
 })
 export class AgentService {
   private http = inject(HttpClient);
-  private deviceSelection = inject(DeviceSelectionService);
   private zone = inject(NgZone);
   private activePauseCardKey: string | null = null;
 
@@ -429,11 +427,6 @@ export class AgentService {
     proTuning?: ProTuningOptions
   ): Observable<any> {
     return new Observable((obs) => {
-      const deviceSerial = this.deviceSelection.selectedSerial();
-      if (!deviceSerial || !this.deviceSelection.canStart()) {
-        obs.error({ error: { detail: 'Select an idle online device before starting a task.' } });
-        return;
-      }
       const submittedEvent: StartupProgressEvent = {
         stage: 'submitting',
         message: 'Submitting the task',
@@ -441,8 +434,7 @@ export class AgentService {
       };
       this.pendingStartupProgress.set([submittedEvent]);
       const payload: any = {
-        goal, profile, device_serial: deviceSerial, require_idle: true,
-        expected_adb_endpoint_id: this.deviceSelection.adbEndpointId()
+        goal, profile, require_idle: true
       };
       if (expectedOutput && expectedOutput.trim()) {
         payload.expected_output = expectedOutput.trim();
@@ -461,8 +453,7 @@ export class AgentService {
         next: (res) => {
           if (res?.status === 'rejected') {
             this.pendingStartupProgress.set([]);
-            this.deviceSelection.refresh();
-            obs.error({ error: { detail: res.error || 'The selected device is unavailable.' } });
+            obs.error({ error: { detail: res.error || 'No idle device is available.' } });
             return;
           }
           if (res && res.tasks && res.tasks.length > 0) {
@@ -492,7 +483,6 @@ export class AgentService {
         },
         error: (err) => {
           this.pendingStartupProgress.set([]);
-          this.deviceSelection.refresh();
           obs.error(err);
         }
       });
@@ -1606,7 +1596,6 @@ export class AgentService {
           // A missed session_ended event must not leave the selected run's
           // conclusion/notes stale after status polling observes completion.
           if (!isActive && (oldStatus === 'running' || oldStatus === 'paused')) {
-            this.deviceSelection.refresh();
             if (oldRunningSessionId && this.currentSessionId() === oldRunningSessionId) {
               this.fetchNotes(oldRunningSessionId);
               this.fetchTestWorkflow(oldRunningSessionId);

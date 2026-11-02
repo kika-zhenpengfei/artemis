@@ -118,13 +118,13 @@ def competing_claims(tmp_path, workflow_id):
                 process.communicate(timeout=5)
 
 
-def test_only_one_process_claims_the_same_confirmed_workflow(tmp_path, workflow):
+def test_only_one_process_claims_the_same_workflow(tmp_path, workflow):
     with competing_claims(tmp_path, workflow) as results:
         claimed = [result for result in results if result.get("claim_token")]
         assert len(claimed) == 1, results
         assert claimed[0]["status"] == "starting"
-        assert claimed[0]["device_serial"] == "phone-a"
-        assert claimed[0]["adb_endpoint_id"] == "endpoint-a"
+        assert claimed[0]["device_serial"] is None
+        assert claimed[0]["adb_endpoint_id"] is None
         rejected = [result for result in results if not result.get("claim_token")]
         assert len(rejected) == 1
         assert rejected[0].get("status_code") == 409, results
@@ -135,7 +135,7 @@ def test_only_one_process_claims_the_same_confirmed_workflow(tmp_path, workflow)
     assert recovered["status"] == "awaiting_device"
     assert recovered["device_serial"] is None
     assert "interrupted" in recovered["error"]
-    assert WorkflowStartStore().claim(workflow)["status"] == "awaiting_device"
+    assert WorkflowStartStore().claim(workflow)["status"] == "starting"
 
 
 @pytest.mark.parametrize("operation", ["confirm", "claim", "failed"])
@@ -169,7 +169,7 @@ def test_late_failure_cannot_revoke_a_new_confirmation_or_claim(workflow, replac
     starts.failed(workflow, first["claim_token"], "First startup failed")
     starts.confirm(workflow, "phone-b", "endpoint-b")
     if replacement_claimed:
-        replacement = starts.claim(workflow)
+        replacement = starts.claim(workflow, device_serial="phone-b", adb_endpoint_id="endpoint-b")
         assert replacement["claim_token"] != first["claim_token"]
 
     late = starts.failed(workflow, first["claim_token"], "Late first-startup failure")
@@ -213,4 +213,4 @@ TestWorkflowStore().bind(workflow_id, session_id=workflow_id, device_serial="pho
     assert recovered["device_serial"] is None
     assert TestWorkflowStore().planned(workflow)["session_id"] is None
     starts.confirm(workflow, "phone-b", "endpoint-b")
-    assert starts.claim(workflow)["device_serial"] == "phone-b"
+    assert starts.claim(workflow)["device_serial"] is None

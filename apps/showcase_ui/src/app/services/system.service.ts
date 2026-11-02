@@ -495,27 +495,6 @@ export class SystemService {
     );
   }
 
-  /**
-   * Select a specific connected device serial as active target
-   */
-  public selectDevice(serial: string): Observable<any> {
-    this.isLoading.set(true);
-    return this.http.post<any>('/api/system/devices/select', { serial }).pipe(
-      tap({
-        next: (res) => {
-          if (res?.report) {
-            this.applyReadinessReport(res.report);
-          }
-          this.isLoading.set(false);
-        },
-        error: (err) => {
-          console.error('Failed to select active device:', err);
-          this.isLoading.set(false);
-        }
-      })
-    );
-  }
-
   public currentApiKey = computed<string>(() => {
     return (this.llmProbe()?.metadata?.['current_key'] as string) || '';
   });

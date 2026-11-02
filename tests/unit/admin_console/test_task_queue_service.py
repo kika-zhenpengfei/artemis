@@ -25,6 +25,7 @@ from apps.admin_console.core.state import state
 from apps.admin_console.routers.tasks import get_status
 from apps.admin_console.services.task_queue_service import TaskQueueService, task_queue_service
 from artemis.runtime.device_lock import DeviceLockOwner
+from artemis.runtime.device_pool import DeviceStatus, device_pool
 from artemis.runtime.adb_endpoint import AdbEndpoint
 
 
@@ -32,6 +33,10 @@ from artemis.runtime.adb_endpoint import AdbEndpoint
 def clean_state(tmp_path, monkeypatch):
     """Reset global state between tests."""
     monkeypatch.setattr("artemis.runtime.trace_store.TRACES_DIR", str(tmp_path / "traces"))
+    monkeypatch.setattr(
+        device_pool, "try_list_devices_async",
+        AsyncMock(return_value=[DeviceStatus("emulator-5554", "device")]),
+    )
     isolated_pause_file = tmp_path / ".artemis_paused"
     # Redirect DeviceExecutionLock's lock/queue directory into tmp_path so that
     # enqueue reservations never touch the real %TEMP%/artemis/device-locks dir
@@ -749,6 +754,7 @@ async def test_enqueue_tasks_unified_ingress():
     """Verify enqueue_tasks correctly propagates ingress, custom session_id, and conversation_id."""
     with (
         patch.object(TaskQueueService, "ensure_worker_running"),
+        patch("apps.admin_console.services.task_queue_service.DeviceExecutionLock.acquire"),
         patch(
             "apps.admin_console.services.task_queue_service.DeviceExecutionLock.reserve",
             return_value="mock-ticket-unified",
@@ -967,6 +973,7 @@ async def test_enqueue_tasks_deduplicates_by_session_id():
 
     with (
         patch("apps.admin_console.services.task_queue_service.session_repo"),
+        patch("apps.admin_console.services.task_queue_service.DeviceExecutionLock.acquire"),
         patch(
             "apps.admin_console.services.task_queue_service.DeviceExecutionLock.reserve",
             return_value="ticket-123",
@@ -1094,6 +1101,7 @@ async def test_enqueue_tasks_debounces_rapid_identical_submissions():
 
     with (
         patch("apps.admin_console.services.task_queue_service.session_repo"),
+        patch("apps.admin_console.services.task_queue_service.DeviceExecutionLock.acquire"),
         patch(
             "apps.admin_console.services.task_queue_service.DeviceExecutionLock.reserve",
             return_value="ticket-456",

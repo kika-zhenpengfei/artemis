@@ -60,13 +60,10 @@ limitations under the License.
     </div>
   </header>
 
-  <app-device-selector [disabled]="isSubmitting()" />
-
   <!-- Scrollable Messages/Content Area -->
   <main class="chat-messages">
     <!-- Tasks Tab Content -->
     @if (agentService.activeTab() === 'tasks') {
-      <app-workflow-device-queue />
       <!-- Active Queue Section -->
       <div class="queue-section-header">
         <span class="material-symbols-outlined section-icon">bolt</span> Active Queue ({{ activeQueue().length }})

@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -52,6 +53,16 @@ def temp_trace_env(monkeypatch):
     temp_dir = tempfile.mkdtemp()
     monkeypatch.setattr(trace_store, "TRACES_DIR", temp_dir)
     monkeypatch.setenv("ARTEMIS_STANDALONE", "1")
+    from artemis.runtime.device_pool import DeviceStatus, device_pool
+
+    monkeypatch.setattr(
+        device_pool, "try_list_devices",
+        lambda: [DeviceStatus("auto-device", "device")],
+    )
+    monkeypatch.setattr("artemis.runtime.device_lock.get_temp_dir", lambda _: Path(temp_dir))
+    # Dispatch tests mock reservation files; lock admission has separate coverage.
+    monkeypatch.setattr("artemis.runtime.device_lock.DeviceExecutionLock.acquire", lambda *args, **kwargs: None)
+
     yield temp_dir
     shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -252,7 +263,7 @@ async def test_mobile_session_open_includes_web_ui_status(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_workflow_session_waits_until_webui_confirmation(monkeypatch):
+async def test_workflow_session_retries_until_an_idle_device_is_available(monkeypatch):
     manager = MagicMock()
     manager.open = AsyncMock(side_effect=[
         {"workflow_id": "workflow-1", "status": "awaiting_device"},
@@ -309,14 +320,15 @@ def test_mobile_run_task_reserves_and_passes_global_queue_ticket(temp_trace_env)
         description="MCP task: Open Settings",
         session_id=result["trace_id"],
         ingress="mcp",
+        device_id="auto-device",
     )
     assert result["trace_id"]
-    assert result["device_serial"] == "auto-select"
+    assert result["device_serial"] == "auto-device"
     assert popen.call_args.kwargs["env"]["ARTEMIS_DEVICE_QUEUE_TICKET"] == "queue-ticket-1"
     assert popen.call_args.kwargs["env"]["ARTEMIS_TASK_INGRESS"] == "mcp"
     status = trace_store.read_status(result["trace_id"])
     assert status["queue_ticket"] == "queue-ticket-1"
-    assert status["device_serial"] is None
+    assert status["device_serial"] == "auto-device"
 
 
 def test_mobile_run_task_with_device_serial(temp_trace_env):

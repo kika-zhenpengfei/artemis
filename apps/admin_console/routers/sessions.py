@@ -168,16 +168,11 @@ async def run_prepared_test_workflow(workflow_id: str, request: PreparedRunReque
 
     try:
         start = await asyncio.to_thread(WorkflowStartStore().status, workflow_id)
-        if start["status"] == "awaiting_device":
-            return start
-        if start["status"] != "confirmed":
+        if start["status"] in {"starting", "running"}:
             raise WorkflowStartError("This test workflow is already starting or running")
-        if request.device_serial and request.device_serial != start["device_serial"]:
-            raise WorkflowStartError("Device must match this workflow's WebUI confirmation")
-        endpoint = check_adb_endpoint(start["adb_endpoint_id"])
-        check_adb_endpoint(request.expected_adb_endpoint_id)
+        endpoint = check_adb_endpoint(request.expected_adb_endpoint_id)
         device_serial, require_idle = await resolve_device_selection(
-            start["device_serial"], require_idle=True,
+            request.device_serial, require_idle=True,
             expected_adb_endpoint_id=endpoint.identity,
         )
     except (DeviceSelectionError, WorkflowStartError) as exc:

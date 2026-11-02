@@ -333,7 +333,7 @@ class TestWorkflowStore:
             "case_count": len(clean_cases),
             "uncovered_requirement_ids": sorted(known_requirements - covered),
             "plan_path": str(plan_path),
-            "next": "Confirm a device for this workflow in the WebUI, then open mobile_session with workflow_id.",
+            "next": "Open mobile_session with workflow_id to automatically allocate an idle device.",
         }
 
     def set_execution_plans(

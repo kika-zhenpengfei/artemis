@@ -79,14 +79,11 @@ describe('AgentService notes request ordering', () => {
 describe('AgentService completion polling recovery', () => {
   let service: AgentService;
   let response: Record<string, any>;
-  let refreshDevices: jasmine.Spy;
 
   beforeEach(() => {
     service = Object.create(AgentService.prototype) as AgentService;
     response = { status: 'idle', session_id: null, active_tasks: [], queue: [] };
     (service as any).http = { get: () => of(response) };
-    refreshDevices = jasmine.createSpy('refreshDevices');
-    (service as any).deviceSelection = { refresh: refreshDevices };
     (service as any).pendingQueue = signal<any[]>([]);
     service.agentStatus = signal('running');
     service.runningSessionId = signal<string | null>('finished-run');
@@ -113,18 +110,15 @@ describe('AgentService completion polling recovery', () => {
     expect(service.fetchTestWorkflow).toHaveBeenCalledOnceWith('finished-run');
     expect(service.fetchChecks).toHaveBeenCalledOnceWith('finished-run');
     expect((service as any).backfillSessionSteps).toHaveBeenCalledOnceWith('finished-run');
-    expect(refreshDevices).toHaveBeenCalledTimes(1);
 
     service.fetchStatus();
     expect(service.fetchNotes).toHaveBeenCalledTimes(1);
-    expect(refreshDevices).toHaveBeenCalledTimes(1);
   });
 
-  it('refreshes device availability without replacing a different selected history run', () => {
+  it('preserves a different selected history run when execution finishes', () => {
     service.currentSessionId.set('history-run');
     service.fetchStatus();
 
-    expect(refreshDevices).toHaveBeenCalledTimes(1);
     expect(service.currentSessionId()).toBe('history-run');
     expect(service.fetchNotes).not.toHaveBeenCalled();
     expect(service.fetchTestWorkflow).not.toHaveBeenCalled();
@@ -138,7 +132,6 @@ describe('AgentService completion polling recovery', () => {
 
     expect(service.fetchNotes).not.toHaveBeenCalled();
     expect(service.fetchChecks).not.toHaveBeenCalled();
-    expect(refreshDevices).not.toHaveBeenCalled();
   });
 });
 
@@ -153,12 +146,6 @@ describe('AgentService live LLM retry timeline', () => {
     (service as any).sessionSnapshotRequestId = 0;
     (service as any).sessionSnapshotAppliedId = 0;
     (service as any).pendingSnapshotRequests = new Set<number>();
-    (service as any).deviceSelection = {
-      selectedSerial: signal<string | null>('selected-phone'),
-      adbEndpointId: signal('tcp:127.0.0.1:5037'),
-      canStart: signal(true),
-      refresh: jasmine.createSpy('refreshDevices')
-    };
     return service;
   }
 
@@ -325,7 +312,7 @@ describe('AgentService live LLM retry timeline', () => {
     expect(selectSpy).toHaveBeenCalledWith('new-session', false);
   });
 
-  it('binds task submission to the selected device and requires it to be idle', () => {
+  it('submits tasks for automatic idle-device allocation without a device choice', () => {
     const service = createServiceWithoutPolling();
     const post = jasmine.createSpy('post').and.returnValue(of({ tasks: [] }));
     (service as any).http = { post };
@@ -333,32 +320,15 @@ describe('AgentService live LLM retry timeline', () => {
 
     service.runTask('Open Settings', 'pro').subscribe();
 
-    expect(post).toHaveBeenCalledWith('/api/run', jasmine.objectContaining({
-      goal: 'Open Settings', profile: 'pro', device_serial: 'selected-phone', require_idle: true,
-      expected_adb_endpoint_id: 'tcp:127.0.0.1:5037'
-    }));
-  });
-
-  it('does not submit without a selected idle device', () => {
-    const service = createServiceWithoutPolling();
-    const post = jasmine.createSpy('post');
-    (service as any).http = { post };
-    const rejected = jasmine.createSpy('rejected');
-
-    (service as any).deviceSelection.selectedSerial.set(null);
-    service.runTask('Open Settings').subscribe({ error: rejected });
-    (service as any).deviceSelection.selectedSerial.set('busy-phone');
-    (service as any).deviceSelection.canStart.set(false);
-    service.runTask('Open Settings').subscribe({ error: rejected });
-
-    expect(post).not.toHaveBeenCalled();
-    expect(rejected).toHaveBeenCalledTimes(2);
+    expect(post).toHaveBeenCalledWith('/api/run', {
+      goal: 'Open Settings', profile: 'pro', require_idle: true
+    });
   });
 
   it('reports a rejected device submission without treating it as a started task', () => {
     const service = createServiceWithoutPolling();
     (service as any).http = {
-      post: () => of({ status: 'rejected', error: 'Selected phone disconnected', tasks: [] })
+      post: () => of({ status: 'rejected', error: 'No idle device is available.', tasks: [] })
     };
     service.userPinnedSessionId = signal<string | null>(null);
     const started = jasmine.createSpy('started');
@@ -369,8 +339,7 @@ describe('AgentService live LLM retry timeline', () => {
 
     expect(started).not.toHaveBeenCalled();
     expect(selectSpy).not.toHaveBeenCalled();
-    expect(rejected).toHaveBeenCalledWith({ error: { detail: 'Selected phone disconnected' } });
-    expect((service as any).deviceSelection.refresh).toHaveBeenCalled();
+    expect(rejected).toHaveBeenCalledWith({ error: { detail: 'No idle device is available.' } });
   });
 
   it('keeps the paused state when the backend says there is nothing to resume', () => {

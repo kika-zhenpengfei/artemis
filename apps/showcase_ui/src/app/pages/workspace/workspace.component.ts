@@ -21,7 +21,6 @@ import { AgentStreamComponent } from '../../components/agent-stream/agent-stream
 import { ChatInterfaceComponent } from '../../components/chat-interface/chat-interface.component';
 import { FloatingVideoPlayerComponent } from '../../components/floating-video-player/floating-video-player.component';
 import { AgentService } from '../../services/agent.service';
-import { DeviceSelectionService } from '../../services/device-selection.service';
 
 @Component({
   selector: 'app-workspace',
@@ -38,7 +37,6 @@ import { DeviceSelectionService } from '../../services/device-selection.service'
 })
 export class WorkspaceComponent implements OnInit {
   public agentService = inject(AgentService);
-  public deviceSelection = inject(DeviceSelectionService);
   private zone = inject(NgZone);
   private destroyRef = inject(DestroyRef);
 
@@ -223,11 +221,6 @@ export class WorkspaceComponent implements OnInit {
   public submitTask(): void {
     const goal = this.taskInput.trim();
     if (!goal || this.isSubmitting()) {
-      return;
-    }
-
-    if (!this.deviceSelection.canStart()) {
-      this.errorMessage.set('Select an idle online device before starting a task.');
       return;
     }
 

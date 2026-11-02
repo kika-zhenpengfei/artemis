@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Cross-process execution-device preference, scoped to one ADB server."""
+"""Resolve explicit targets or automatically allocate an idle device."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ def check_adb_endpoint(expected_id: str | None = None) -> AdbEndpoint:
     endpoint = current_adb_endpoint()
     if expected_id is not None and endpoint.identity != expected_id:
         raise DeviceSelectionError(
-            "The ADB server changed. Refresh the device list and select a device again."
+            "The ADB server changed. Retry the task against the current server."
         )
     return endpoint
 
@@ -100,19 +100,27 @@ def validate_idle_device(serial: str, devices: list[DeviceStatus] | None) -> Non
 
 
 def _requested_selection(
-    serial: str | None = None, *, require_idle: bool = False, endpoint: AdbEndpoint | None = None
+    serial: str | None = None, *, require_idle: bool = False
 ) -> tuple[str | None, bool]:
-    selected = get_selected_serial(endpoint) if serial is None else None
-    resolved = serial if serial is not None else selected
-    require_idle = require_idle or selected is not None
+    resolved = serial
+    require_idle = require_idle or serial is None
     if resolved is not None:
         resolved = resolved.strip()
         if not resolved:
             raise DeviceSelectionError("Device serial cannot be empty.")
-    if require_idle:
-        if resolved is None:
-            raise DeviceSelectionError("Select an idle Android device before starting a test.")
     return resolved, require_idle
+
+
+def _idle_serial(serial: str | None, devices: list[DeviceStatus] | None) -> str:
+    if devices is None:
+        raise DeviceSelectionError("Could not list Android devices. Try again.", 503)
+    if serial is not None:
+        validate_idle_device(serial, devices)
+        return serial
+    for device in devices:
+        if device.state == "device" and not device.is_busy and not device.queued_count:
+            return device.serial
+    raise DeviceSelectionError("No idle Android device is available. Connect a ready device or wait for a running task to finish.")
 
 
 async def resolve_device_selection(
@@ -123,10 +131,10 @@ async def resolve_device_selection(
 ) -> tuple[str | None, bool]:
     endpoint = check_adb_endpoint(expected_adb_endpoint_id)
     resolved, require_idle = _requested_selection(
-        serial, require_idle=require_idle, endpoint=endpoint
+        serial, require_idle=require_idle
     )
-    if require_idle and resolved is not None:
-        validate_idle_device(resolved, await device_pool.try_list_devices_async())
+    if require_idle:
+        resolved = _idle_serial(resolved, await device_pool.try_list_devices_async())
     check_adb_endpoint(endpoint.identity)
     return resolved, require_idle
 
@@ -136,9 +144,9 @@ def resolve_device_selection_sync(
 ) -> tuple[str | None, bool]:
     endpoint = check_adb_endpoint()
     resolved, require_idle = _requested_selection(
-        serial, require_idle=require_idle, endpoint=endpoint
+        serial, require_idle=require_idle
     )
-    if require_idle and resolved is not None:
-        validate_idle_device(resolved, device_pool.try_list_devices())
+    if require_idle:
+        resolved = _idle_serial(resolved, device_pool.try_list_devices())
     check_adb_endpoint(endpoint.identity)
     return resolved, require_idle

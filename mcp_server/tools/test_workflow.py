@@ -87,8 +87,8 @@ def mobile_test_cases(
     external-agent profile does not invoke the autonomous Flash/Pro LLM graph.
     This publishes the workflow to the WebUI waiting list. Next call
     `mobile_session(operation='open', workflow_id=...)` and keep waiting while
-    it returns `awaiting_device`. The user selects and confirms a device for
-    this workflow in WebUI before execution can start.
+    it returns `awaiting_device`. An idle device is allocated automatically;
+    begin device actions only after the session returns `running`.
     """
     return _store.set_cases(workflow_id, cases=cases, profile=profile)
 

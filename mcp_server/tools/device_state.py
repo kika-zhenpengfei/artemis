@@ -45,9 +45,8 @@ async def mobile_get_device_state(view_type: str, device_serial: str | None = No
           - "hierarchy": returns the simplified text-labeled element list —
             exactly what the automation subagent sees when making decisions.
         device_serial: Optional device serial (e.g. "emulator-5554") to inspect
-          a specific device; omitted → the default connected device. With
-          several devices attached, confirm the target with the user
-          (`adb devices -l` lists serials).
+          a specific device; omitted → the default connected device. When
+          inspecting a running task, use its recorded device serial.
     """
     try:
         controller = _get_controller(device_serial=device_serial)

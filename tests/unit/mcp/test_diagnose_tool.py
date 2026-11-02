@@ -448,8 +448,8 @@ def test_ready_environment_reports_ready_with_slim_shape(temp_trace_env):
     assert "overall_ready" not in result
     assert "active_device" not in result
     assert result["next_steps"] == [
-        "Environment is ready. Use mobile_run_task to delegate a task; pass device_serial "
-        "when more than one device is attached."
+        "Environment is ready. Use mobile_run_task to delegate a task; omit device_serial "
+        "to automatically allocate an idle device."
     ]
     assert "SECRET" not in repr(result)
 
@@ -513,8 +513,8 @@ def test_executor_only_mode_does_not_require_an_artemis_llm_key(temp_trace_env, 
     assert credential["required"] is False
     assert result["next_steps"] == [
         "Environment is ready. Open a current-Codex device lease with "
-        "mobile_session(operation='open'); pass device_serial when more than one "
-        "device is attached."
+        "mobile_session(operation='open'); omit device_serial to automatically "
+        "allocate an idle device."
     ]
     assert result["emulator"] is None
     assert result["credentials"] is None

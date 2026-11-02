@@ -213,22 +213,12 @@ class AdbDeviceRuntimeAdapter:
                 continue
             if state == "device":
                 ready_serials.append(device.serial)
-        if device_serial:
-            if device_serial not in ready_serials:
-                available = ", ".join(ready_serials) or "none"
-                raise RuntimeError(
-                    f"Target Android device '{device_serial}' is not ready. Ready devices: {available}."
-                )
-            resolved_serial = device_serial
-        elif len(ready_serials) == 1:
-            resolved_serial = ready_serials[0]
-        elif not ready_serials:
-            raise RuntimeError("No authorized Android device is ready.")
-        else:
+        if device_serial not in ready_serials:
+            available = ", ".join(ready_serials) or "none"
             raise RuntimeError(
-                "Several Android devices are ready; choose one explicitly with device_serial: "
-                + ", ".join(ready_serials)
+                f"Target Android device '{device_serial}' is not ready. Ready devices: {available}."
             )
+        resolved_serial = device_serial
 
         check_adb_endpoint(endpoint.identity)
         device_lock = DeviceExecutionLock(
@@ -377,10 +367,6 @@ class DeviceExecutionManager:
                     workflow_id, device_serial=device_serial,
                     adb_endpoint_id=expected_adb_endpoint_id,
                 )
-                if start_claim["status"] != "starting":
-                    return self._awaiting_device(start_claim)
-                device_serial = start_claim["device_serial"]
-                expected_adb_endpoint_id = start_claim["adb_endpoint_id"]
                 require_idle = True
             self._opening_sessions.add(resolved_session_id)
 
@@ -405,7 +391,7 @@ class DeviceExecutionManager:
                     workflow_id, start_claim["claim_token"], str(exc) or "Device startup was cancelled.",
                 )
                 if isinstance(exc, (DeviceBusyError, DeviceSelectionError, RuntimeError)):
-                    logger.warning(f"Workflow {workflow_id} could not open its confirmed device: {exc}")
+                    logger.warning(f"Workflow {workflow_id} could not allocate an idle device: {exc}")
                     return self._awaiting_device(waiting)
             raise
         data_engine: DataEngine | None = None
@@ -503,7 +489,7 @@ class DeviceExecutionManager:
     def _awaiting_device(state: dict[str, Any]) -> dict[str, Any]:
         return {
             **state,
-            "next": "Wait for device confirmation in the WebUI, then call mobile_session open with this workflow_id again.",
+            "next": "No device lease is available yet. Call mobile_session open with this workflow_id again to retry automatic idle-device allocation.",
         }
 
     async def status(self, session_id: str | None = None) -> dict[str, Any]:

@@ -220,17 +220,13 @@ async def mobile_session(
     """Open, inspect, or close an external-agent-driven device session.
 
     Operations:
-      - `open` with `workflow_id`: waits for the user to select an idle device
-        and confirm this workflow in WebUI Test Plans or Task Queue. It leases
-        no device before confirmation. Each call waits up to
-        `wait_timeout_seconds` (default 25, maximum 30). On `awaiting_device`,
-        keep the Codex task active and call open again with the same workflow;
-        only `status='running'` permits device actions. The per-workflow choice
-        is authoritative; an explicit `device_serial` must match it.
-      - `open` without a workflow requires `goal`. An explicit `device_serial`
-        takes precedence over the saved global WebUI choice. An unavailable
-        saved choice is rejected. With several ready devices and no selection,
-        ask the user to choose. `require_idle` rejects a busy explicit target.
+      - `open` with `workflow_id`: automatically leases an idle device for
+        the prepared workflow. Each call waits up to `wait_timeout_seconds`
+        (default 25, maximum 30). On `awaiting_device`, keep the task active
+        and call open again; only `status='running'` permits device actions.
+      - `open` without a workflow requires `goal`. Omit `device_serial` to
+        allocate an idle device automatically. An explicit serial targets that
+        device; `require_idle` rejects it if busy. Saved WebUI choices are ignored.
       - `status`: pass `session_id` for one session or omit it to list sessions.
       - `close`: pass `session_id`, terminal `status` (`completed`, `failed`, or
         `cancelled`) and an optional summary. Always close the session when done
@@ -264,8 +260,7 @@ async def mobile_session(
             await asyncio.sleep(min(1.0, remaining))
         if result.get("status") == "awaiting_device":
             result["next"] = (
-                "Wait for the user to select an idle device and confirm this workflow "
-                "in WebUI Test Plans or Task Queue. Keep this Codex task active and "
+                "Waiting for an idle device to become available. Keep this Codex task active and "
                 "call mobile_session(operation='open', workflow_id=...) again. "
                 "Begin device actions only after status='running'."
             )

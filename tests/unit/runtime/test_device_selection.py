@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared selection never silently executes on a different connected device."""
+"""Automatic allocation ignores saved choices and preserves explicit target safety."""
 
 import asyncio
 import importlib
@@ -86,13 +86,13 @@ def test_another_process_reads_the_saved_choice():
         (None, 503),
     ],
 )
-def test_saved_choice_never_falls_back_when_unavailable(monkeypatch, devices, code):
+def test_explicit_choice_never_falls_back_when_unavailable(monkeypatch, devices, code):
     selection.save_selected_serial("phone-a")
     monkeypatch.setattr(
         selection.device_pool, "try_list_devices_async", AsyncMock(return_value=devices)
     )
     with pytest.raises(selection.DeviceSelectionError) as error:
-        asyncio.run(selection.resolve_device_selection())
+        asyncio.run(selection.resolve_device_selection("phone-a", require_idle=True))
     assert error.value.status_code == code
     assert selection.get_selected_serial() == "phone-a"
 
@@ -263,8 +263,8 @@ def test_strict_queue_admission_hands_device_to_its_reservation(monkeypatch):
     DeviceExecutionLock.cancel_reservation(item["queue_ticket"])
 
 
-def test_webui_run_inherits_selection_and_binds_probe_and_queue(monkeypatch):
-    selection.save_selected_serial("phone-a")
+def test_webui_run_automatically_binds_probe_and_queue(monkeypatch):
+    selection.save_selected_serial("stale-phone")
     monkeypatch.setattr(
         selection.device_pool,
         "try_list_devices_async",
@@ -283,21 +283,37 @@ def test_webui_run_inherits_selection_and_binds_probe_and_queue(monkeypatch):
     assert enqueue.call_args.kwargs["require_idle"] is True
 
 
-def test_legacy_mcp_inherits_selection_and_rejects_stale_choice(monkeypatch, tmp_path):
-    from artemis.runtime import trace_store
+@pytest.mark.parametrize("synchronous", [False, True])
+@pytest.mark.parametrize("saved_choice", ["offline", "corrupt"])
+def test_automatic_allocation_ignores_saved_choice_and_skips_unavailable_devices(monkeypatch, synchronous, saved_choice):
+    selection.save_selected_serial("old-phone")
+    if saved_choice == "corrupt":
+        selection._selection_path(selection.current_adb_endpoint()).write_text("{broken")
+    devices = [
+        DeviceStatus("old-phone", "offline"),
+        DeviceStatus("unauthorized", "unauthorized"),
+        DeviceStatus("busy", "device", is_busy=True),
+        DeviceStatus("queued", "device", queued_count=1),
+        DeviceStatus("idle", "device"),
+        DeviceStatus("another-idle", "device"),
+    ]
+    monkeypatch.setattr(selection.device_pool, "try_list_devices", lambda: devices)
+    monkeypatch.setattr(selection.device_pool, "try_list_devices_async", AsyncMock(return_value=devices))
+    result = selection.resolve_device_selection_sync() if synchronous else asyncio.run(selection.resolve_device_selection(require_idle=True))
+    assert result == ("idle", True)
 
-    runner = importlib.import_module("mcp_server.tools.task_runner")
-    monkeypatch.setattr(trace_store, "TRACES_DIR", str(tmp_path / "traces"))
-    selection.save_selected_serial("phone-a")
-    monkeypatch.setattr(
-        selection.device_pool, "try_list_devices", lambda: [DeviceStatus("phone-b", "device")]
-    )
-    daemon = AsyncMock(side_effect=AssertionError("Stale choice must not dispatch"))
-    monkeypatch.setattr(runner, "ensure_daemon_running", daemon)
-    result = runner.mobile_run_task("Check display")
-    assert result["status"] == "failed"
-    assert "phone-a" in result["error"]
-    daemon.assert_not_called()
+
+@pytest.mark.parametrize("devices,code", [
+    ([], 409),
+    ([DeviceStatus("busy", "device", is_busy=True), DeviceStatus("queued", "device", queued_count=1)], 409),
+    ([DeviceStatus("offline", "offline"), DeviceStatus("unauthorized", "unauthorized")], 409),
+    (None, 503),
+])
+def test_automatic_allocation_requires_an_idle_authorized_device(monkeypatch, devices, code):
+    monkeypatch.setattr(selection.device_pool, "try_list_devices_async", AsyncMock(return_value=devices))
+    with pytest.raises(selection.DeviceSelectionError) as error:
+        asyncio.run(selection.resolve_device_selection())
+    assert error.value.status_code == code
 
 
 def test_stale_endpoint_rejects_select_and_run_without_saving_or_dispatching(monkeypatch):
